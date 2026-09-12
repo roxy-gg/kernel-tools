@@ -28,7 +28,6 @@ static NTSTATUS HandleWriteRegistry(WDFREQUEST Request, size_t InputBufferLength
 static NTSTATUS HandleListFiles(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 static NTSTATUS HandleReadFile(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 static NTSTATUS HandleWriteFile(WDFREQUEST Request, size_t InputBufferLength);
-static NTSTATUS HandleListConnections(WDFREQUEST Request, size_t OutputBufferLength);
 
 // ---------------------------------------------------------------------------
 // DriverEntry
@@ -156,9 +155,6 @@ EvtIoDeviceControl(
         break;
     case IOCTL_AI_WRITE_FILE:
         status = HandleWriteFile(Request, InputBufferLength);
-        break;
-    case IOCTL_AI_LIST_CONNECTIONS:
-        status = HandleListConnections(Request, OutputBufferLength);
         break;
     default:
         KdPrint(("AIBridge: Unknown IOCTL: 0x%08X\n", IoControlCode));
@@ -838,128 +834,4 @@ HandleWriteFile(
     }
 
     return status;
-}
-
-// ---------------------------------------------------------------------------
-// HandleListConnections — enumerate TCP/UDP connections via system handles
-// ---------------------------------------------------------------------------
-static NTSTATUS
-HandleListConnections(
-    WDFREQUEST Request,
-    size_t     OutputBufferLength
-)
-{
-    PVOID outBuffer = NULL;
-    NTSTATUS status = WdfRequestRetrieveOutputBuffer(Request, OutputBufferLength, &outBuffer, NULL);
-    if (!NT_SUCCESS(status)) return status;
-
-    RtlZeroMemory(outBuffer, OutputBufferLength);
-    PAI_LIST_CONNECTIONS_OUT output = (PAI_LIST_CONNECTIONS_OUT)outBuffer;
-    PAI_CONNECTION_ENTRY entries = (PAI_CONNECTION_ENTRY)(output + 1);
-
-    ULONG maxEntries = (ULONG)((OutputBufferLength - sizeof(AI_LIST_CONNECTIONS_OUT))
-        / sizeof(AI_CONNECTION_ENTRY));
-    ULONG entryCount = 0;
-
-    // Enumerate handles from system handle table and filter for
-    // TCP/UDP device handles (\Device\Tcp*, \Device\Udp*)
-    ULONG handleInfoSize = 0;
-    status = ZwQuerySystemInformation(SystemExtendedHandleInformation, NULL, 0, &handleInfoSize);
-    if (status != STATUS_INFO_LENGTH_MISMATCH) {
-        output->EntryCount = 0;
-        WdfRequestSetInformation(Request, sizeof(AI_LIST_CONNECTIONS_OUT));
-        return STATUS_SUCCESS;
-    }
-
-    handleInfoSize += 0x200000; // +2 MB for large handle tables
-    PSYSTEM_EXTENDED_HANDLE_INFORMATION handleInfo = (PSYSTEM_EXTENDED_HANDLE_INFORMATION)
-        ExAllocatePool2(POOL_FLAG_PAGED, handleInfoSize, 'hcA');
-    if (handleInfo == NULL) {
-        output->EntryCount = 0;
-        WdfRequestSetInformation(Request, sizeof(AI_LIST_CONNECTIONS_OUT));
-        return STATUS_SUCCESS;
-    }
-
-    status = ZwQuerySystemInformation(SystemExtendedHandleInformation, handleInfo, handleInfoSize, NULL);
-
-    if (NT_SUCCESS(status) && handleInfo->NumberOfHandles > 0) {
-        // Walk handles and attempt to identify TCP/UDP connections
-        // by referencing each handle and querying its object name
-        for (ULONG64 i = 0; i < handleInfo->NumberOfHandles && entryCount < maxEntries; i++) {
-            SYSTEM_EXTENDED_HANDLE_TABLE_ENTRY_INFO_EX* handle = &handleInfo->Handles[i];
-
-            // Skip handles without appropriate access
-            if ((handle->GrantedAccess & (FILE_READ_DATA | FILE_WRITE_DATA)) == 0) {
-                continue;
-            }
-
-            // Lookup the process that owns this handle
-            PEPROCESS process = NULL;
-            status = PsLookupProcessByProcessId(handle->UniqueProcessId, &process);
-            if (!NT_SUCCESS(status)) continue;
-
-            // Duplicate the handle into kernel space so we can query it
-            HANDLE hDup = NULL;
-            status = ObOpenObjectByPointer(
-                process,
-                OBJ_KERNEL_HANDLE,
-                NULL,
-                0,
-                NULL,
-                KernelMode,
-                &hDup
-            );
-
-            ObDereferenceObject(process);
-
-            if (!NT_SUCCESS(status)) continue;
-
-            // Query object name to identify \Device\Tcp / \Device\Udp handles
-            ULONG nameBufferSize = 512;
-            POBJECT_NAME_INFORMATION nameInfo = (POBJECT_NAME_INFORMATION)
-                ExAllocatePool2(POOL_FLAG_PAGED, nameBufferSize, 'onA');
-
-            if (nameInfo != NULL) {
-                status = NtQueryObject(hDup, ObjectNameInformation, nameInfo, nameBufferSize, &nameBufferSize);
-                if (NT_SUCCESS(status) && nameInfo->Name.Buffer != NULL && nameInfo->Name.Length > 0) {
-                    // Check if the device name contains "Tcp" or "Udp"
-                    // Use wcsstr equivalent by scanning the buffer
-                    BOOLEAN isTcp = FALSE;
-                    BOOLEAN isUdp = FALSE;
-
-                    for (USHORT j = 0; j < nameInfo->Name.Length / sizeof(WCHAR); j++) {
-                        WCHAR c = nameInfo->Name.Buffer[j];
-                        if (c >= L'A' && c <= L'Z') c += (L'a' - L'A'); // tolower
-
-                        // Simple substring match for "tcp" or "udp"
-                        // In a complete driver we'd use wcsstr or Rtl functions
-                    }
-
-                    if (isTcp || isUdp) {
-                        // Found a TCP/UDP handle; we could query its connection info
-                        // via TDI or WSK. For now, record the owning PID.
-                        entries[entryCount].OwningPid = (ULONG)(ULONG_PTR)handle->UniqueProcessId;
-                        entries[entryCount].IsUdp = isUdp;
-                        entries[entryCount].IsIPv6 = FALSE;
-                        // Actual address/port retrieval requires deeper integration
-                        entries[entryCount].LocalAddr = 0;
-                        entries[entryCount].RemoteAddr = 0;
-                        entries[entryCount].LocalPort = 0;
-                        entries[entryCount].RemotePort = 0;
-                        entries[entryCount].State = 0;
-                        entryCount++;
-                    }
-                }
-                ExFreePool(nameInfo);
-            }
-            ZwClose(hDup);
-        }
-    }
-
-    ExFreePool(handleInfo);
-
-    output->EntryCount = entryCount;
-    size_t bytesReturned = sizeof(AI_LIST_CONNECTIONS_OUT) + entryCount * sizeof(AI_CONNECTION_ENTRY);
-    WdfRequestSetInformation(Request, bytesReturned);
-    return STATUS_SUCCESS;
 }

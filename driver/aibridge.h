@@ -134,25 +134,6 @@ typedef struct _AI_FILE_IO_IN {
 #define AI_MAX_READ_SIZE 65536
 
 // ---------------------------------------------------------------------------
-// ListConnections — output: array of TCP/UDP connection entries
-// ---------------------------------------------------------------------------
-typedef struct _AI_CONNECTION_ENTRY {
-    ULONG64 LocalAddr;      // IPv4 in lower 32 bits (network byte order)
-    ULONG64 RemoteAddr;
-    USHORT  LocalPort;      // network byte order
-    USHORT  RemotePort;
-    ULONG   State;           // MIB_TCP_STATE
-    ULONG   OwningPid;
-    BOOLEAN IsIPv6;
-    BOOLEAN IsUdp;
-} AI_CONNECTION_ENTRY, *PAI_CONNECTION_ENTRY;
-
-typedef struct _AI_LIST_CONNECTIONS_OUT {
-    ULONG EntryCount;
-    // AI_CONNECTION_ENTRY Entries[EntryCount] follows inline
-} AI_LIST_CONNECTIONS_OUT, *PAI_LIST_CONNECTIONS_OUT;
-
-// ---------------------------------------------------------------------------
 // Generic IOCTL result code
 // ---------------------------------------------------------------------------
 typedef struct _AI_STATUS {
