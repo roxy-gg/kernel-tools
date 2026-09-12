@@ -16,7 +16,7 @@
 // Forward declarations
 // ---------------------------------------------------------------------------
 DRIVER_INITIALIZE DriverEntry;
-EVT_WDF_DRIVER_DEVICE_ADD EvtDeviceAdd;
+EVT_WDF_DRIVER_UNLOAD EvtDriverUnload;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL EvtIoDeviceControl;
 
 // Dispatch helpers
@@ -40,78 +40,80 @@ DriverEntry(
 )
 {
     WDF_DRIVER_CONFIG config;
-    WDF_DRIVER_CONFIG_INIT(&config, EvtDeviceAdd);
+    WDFDRIVER driver;
+    PWDFDEVICE_INIT deviceInit = NULL;
+    WDFDEVICE device;
+    WDF_IO_QUEUE_CONFIG queueConfig;
+    WDF_OBJECT_ATTRIBUTES deviceAttributes;
+    NTSTATUS status;
 
-    NTSTATUS status = WdfDriverCreate(
+    WDF_DRIVER_CONFIG_INIT(&config, WDF_NO_EVENT_CALLBACK);
+    config.DriverInitFlags |= WdfDriverInitNonPnpDriver;
+    config.EvtDriverUnload = EvtDriverUnload;
+
+    status = WdfDriverCreate(
         DriverObject,
         RegistryPath,
         WDF_NO_OBJECT_ATTRIBUTES,
         &config,
-        WDF_NO_HANDLE
+        &driver
     );
-
     if (!NT_SUCCESS(status)) {
         KdPrint(("AIBridge: WdfDriverCreate failed: 0x%08X\n", status));
+        return status;
     }
 
-    return status;
-}
+    // The bridge performs privileged operations, so only SYSTEM and local
+    // administrators may open the control device.
+    DECLARE_CONST_UNICODE_STRING(sddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    deviceInit = WdfControlDeviceInitAllocate(driver, &sddl);
+    if (deviceInit == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-// ---------------------------------------------------------------------------
-// EvtDeviceAdd — create device and symlink
-// ---------------------------------------------------------------------------
-NTSTATUS
-EvtDeviceAdd(
-    _In_ WDFDRIVER         Driver,
-    _Inout_ PWDFDEVICE_INIT DeviceInit
-)
-{
-    UNREFERENCED_PARAMETER(Driver);
-    NTSTATUS status;
-
-    // Non-exclusive so multiple user-mode clients can open
-    WdfDeviceInitSetExclusive(DeviceInit, FALSE);
-
-    // Set device name
     DECLARE_CONST_UNICODE_STRING(deviceName, AIBRIDGE_DEVICE_NAME);
-    status = WdfDeviceInitAssignName(DeviceInit, &deviceName);
+    status = WdfDeviceInitAssignName(deviceInit, &deviceName);
     if (!NT_SUCCESS(status)) {
-        KdPrint(("AIBridge: WdfDeviceInitAssignName failed: 0x%08X\n", status));
+        WdfDeviceInitFree(deviceInit);
         return status;
     }
 
-    // Buffered I/O for IOCTL dispatch
-    WdfDeviceInitSetIoType(DeviceInit, WdfDeviceIoBuffered);
+    WdfDeviceInitSetExclusive(deviceInit, TRUE);
+    WdfDeviceInitSetIoType(deviceInit, WdfDeviceIoBuffered);
+    WdfDeviceInitSetDeviceType(deviceInit, FILE_DEVICE_AIBRIDGE);
+    WDF_OBJECT_ATTRIBUTES_INIT(&deviceAttributes);
+    deviceAttributes.ExecutionLevel = WdfExecutionLevelPassive;
 
-    // Create the device
-    WDFDEVICE device;
-    status = WdfDeviceCreate(&DeviceInit, WDF_NO_OBJECT_ATTRIBUTES, &device);
+    status = WdfDeviceCreate(&deviceInit, &deviceAttributes, &device);
     if (!NT_SUCCESS(status)) {
-        KdPrint(("AIBridge: WdfDeviceCreate failed: 0x%08X\n", status));
+        WdfDeviceInitFree(deviceInit);
         return status;
     }
 
-    // Create DOS symbolic link so user-mode opens \\.\AIAgent
     DECLARE_CONST_UNICODE_STRING(dosName, AIBRIDGE_DOS_NAME);
     status = WdfDeviceCreateSymbolicLink(device, &dosName);
     if (!NT_SUCCESS(status)) {
-        KdPrint(("AIBridge: WdfDeviceCreateSymbolicLink failed: 0x%08X\n", status));
         return status;
     }
 
-    // Create the default I/O queue for IOCTL dispatch
-    WDF_IO_QUEUE_CONFIG queueConfig;
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchSequential);
     queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
-
     status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, WDF_NO_HANDLE);
     if (!NT_SUCCESS(status)) {
-        KdPrint(("AIBridge: WdfIoQueueCreate failed: 0x%08X\n", status));
         return status;
     }
 
-    KdPrint(("AIBridge: Device created successfully — \\Device\\AIAgent\n"));
+    WdfControlFinishInitializing(device);
+    KdPrint(("AIBridge: control device created successfully\n"));
     return STATUS_SUCCESS;
+}
+
+VOID
+EvtDriverUnload(
+    _In_ WDFDRIVER Driver
+)
+{
+    UNREFERENCED_PARAMETER(Driver);
 }
 
 // ---------------------------------------------------------------------------
@@ -272,10 +274,11 @@ HandleListProcesses(
     PVOID outBuffer = NULL;
     ULONG maxEntries;
 
-    maxEntries = (ULONG)(OutputBufferLength / sizeof(AI_PROCESS_ENTRY));
-    if (maxEntries < 1) {
+    if (OutputBufferLength < sizeof(ULONG) + sizeof(AI_PROCESS_ENTRY)) {
         return STATUS_BUFFER_TOO_SMALL;
     }
+
+    maxEntries = (ULONG)((OutputBufferLength - sizeof(ULONG)) / sizeof(AI_PROCESS_ENTRY));
 
     status = WdfRequestRetrieveOutputBuffer(Request, OutputBufferLength, &outBuffer, NULL);
     if (!NT_SUCCESS(status)) return status;
@@ -571,13 +574,8 @@ HandleListFiles(
 
     PAI_LIST_FILES_IN input = (PAI_LIST_FILES_IN)inBuffer;
 
-    // Build the full search path: DirectoryPath\*
-    WCHAR searchPath[AI_MAX_PATH + 3];
-    RtlStringCbCopyW(searchPath, sizeof(searchPath), input->DirectoryPath);
-    RtlStringCbCatW(searchPath, sizeof(searchPath), L"\\*");
-
     UNICODE_STRING usSearchPath;
-    RtlInitUnicodeString(&usSearchPath, searchPath);
+    RtlInitUnicodeString(&usSearchPath, input->DirectoryPath);
 
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &usSearchPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -623,6 +621,12 @@ HandleListFiles(
         ExFreePool(dirInfo);
         ZwClose(hDir);
         return status;
+    }
+
+    if (OutputBufferLength < sizeof(AI_LIST_FILES_OUT)) {
+        ExFreePool(dirInfo);
+        ZwClose(hDir);
+        return STATUS_BUFFER_TOO_SMALL;
     }
 
     PVOID outBuffer = NULL;

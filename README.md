@@ -1,4 +1,4 @@
-﻿# kernel-tools
+# kernel-tools
 
 Roxy Kernel Bridge — a Windows kernel driver + userspace MCP bridge that exposes
 system-level operations (process memory, registry, files, networking) as MCP
@@ -36,7 +36,6 @@ JSON-RPC tools over stdin/stdout.
 | `IOCTL_AI_LIST_FILES` | Enumerate files in a directory |
 | `IOCTL_AI_READ_FILE` | Read a file using kernel APIs (bypasses user-mode ACLs) |
 | `IOCTL_AI_WRITE_FILE` | Write a file using kernel APIs |
-| `IOCTL_AI_LIST_CONNECTIONS` | Enumerate active TCP/UDP connections |
 
 ## MCP Tools (exposed by the bridge)
 
@@ -48,7 +47,6 @@ JSON-RPC tools over stdin/stdout.
 - `list_files`
 - `read_file`
 - `write_file`
-- `list_connections`
 
 ## Prerequisites
 
@@ -73,6 +71,6 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | .\out\roxy-k
 
 ## Security Warning
 
-This driver grants ring-0 access to any process that opens `\\\\.\AIAgent`.
-It is intended for **local development and debugging only**. Do not deploy on
-production or internet-facing machines.
+This driver grants ring-0-backed operations to SYSTEM and elevated administrator
+processes that open `\\\\.\AIAgent`. It is intended for **local development and
+debugging only**. Do not deploy on production or internet-facing machines.

@@ -94,7 +94,6 @@ add_library(aibridge SHARED aibridge.c)
 
 target_link_libraries(aibridge
     ntoskrnl.lib
-    wdfkmdf.lib
     ntstrsafe.lib
     hal.lib
 )
@@ -125,7 +124,7 @@ $vcxproj = @'
     <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
     <RootNamespace>AIBridge</RootNamespace>
     <ConfigurationType>Driver</ConfigurationType>
-    <DriverType>WDM</DriverType>
+    <DriverType>KMDF</DriverType>
     <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
     <TargetVersion>Windows10</TargetVersion>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
@@ -149,8 +148,7 @@ $vcxproj = @'
       <BufferSecurityCheck>false</BufferSecurityCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>%(AdditionalDependencies);$(DDK_LIB_PATH)\wdfkmdf.lib;$(DDK_LIB_PATH)\ntoskrnl.lib</AdditionalDependencies>
-      <EntryPointSymbol>DriverEntry</EntryPointSymbol>
+      <AdditionalDependencies>%(AdditionalDependencies)</AdditionalDependencies>
       <SubSystem>Native</SubSystem>
       <Driver>true</Driver>
     </Link>

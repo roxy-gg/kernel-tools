@@ -11,14 +11,13 @@ add_library(aibridge SHARED aibridge.c)
 
 target_link_libraries(aibridge
     ntoskrnl.lib
-    wdfkmdf.lib
     ntstrsafe.lib
     hal.lib
 )
 
 # Driver entry point (no CRT)
 set_target_properties(aibridge PROPERTIES
-    LINK_FLAGS "/DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry"
+    LINK_FLAGS "/DRIVER /SUBSYSTEM:NATIVE /ENTRY:FxDriverEntry"
 )
 
 install(TARGETS aibridge DESTINATION .)

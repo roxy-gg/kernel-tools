@@ -26,7 +26,7 @@ if ($Configuration -eq "release") {
     $buildArgs += "--release"
 }
 
-& cargo $buildArgs 2>&1 | ForEach-Object { Write-Host "  $_" }
+& cargo $buildArgs
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Build failed."

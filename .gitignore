@@ -1,4 +1,4 @@
-﻿# Build outputs
+# Build outputs
 out/
 
 # Driver build artifacts
@@ -12,6 +12,8 @@ driver/*.wrn
 
 # Rust build artifacts
 bridge/target/
+bridge/Cargo.lock
+driver/aibridge.vcxproj
 
 # IDE
 .vs/

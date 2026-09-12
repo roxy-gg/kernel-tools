@@ -11,15 +11,14 @@ use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::io::{self, BufRead, Write};
 use std::os::windows::ffi::OsStrExt;
-use windows::core::GUID;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::IO::DeviceIoControl;
-use windows::Win32::System::Ioctl::{
-    CTL_CODE, FILE_ANY_ACCESS, FILE_DEVICE_UNKNOWN, METHOD_BUFFERED,
-};
+const METHOD_BUFFERED: u32 = 0;
+const FILE_READ_DATA: u32 = 1;
+const FILE_WRITE_DATA: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // IOCTL definitions (must match aibridge.h)
@@ -27,29 +26,23 @@ use windows::Win32::System::Ioctl::{
 const FILE_DEVICE_AIBRIDGE: u32 = 0x8000;
 
 macro_rules! aibridge_ioctl {
-    ($func:expr) => {
-        CTL_CODE(FILE_DEVICE_AIBRIDGE, $func, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    ($func:expr, $access:expr) => {
+        (FILE_DEVICE_AIBRIDGE << 16) | ($access << 14) | ($func << 2) | METHOD_BUFFERED
     };
 }
 
-const IOCTL_AI_READ_PROCESS_MEMORY: u32 = aibridge_ioctl!(0x800);
-const IOCTL_AI_LIST_PROCESSES: u32 = aibridge_ioctl!(0x801);
-const IOCTL_AI_KILL_PROCESS: u32 = aibridge_ioctl!(0x802);
-const IOCTL_AI_READ_REGISTRY: u32 = aibridge_ioctl!(0x803);
-const IOCTL_AI_WRITE_REGISTRY: u32 = aibridge_ioctl!(0x804);
-const IOCTL_AI_LIST_FILES: u32 = aibridge_ioctl!(0x805);
-const IOCTL_AI_READ_FILE: u32 = aibridge_ioctl!(0x806);
-const IOCTL_AI_WRITE_FILE: u32 = aibridge_ioctl!(0x807);
-const IOCTL_AI_LIST_CONNECTIONS: u32 = aibridge_ioctl!(0x808);
+const IOCTL_AI_READ_PROCESS_MEMORY: u32 = aibridge_ioctl!(0x800, FILE_READ_DATA);
+const IOCTL_AI_LIST_PROCESSES: u32 = aibridge_ioctl!(0x801, FILE_READ_DATA);
+const IOCTL_AI_KILL_PROCESS: u32 = aibridge_ioctl!(0x802, FILE_WRITE_DATA);
+const IOCTL_AI_READ_REGISTRY: u32 = aibridge_ioctl!(0x803, FILE_READ_DATA);
+const IOCTL_AI_WRITE_REGISTRY: u32 = aibridge_ioctl!(0x804, FILE_WRITE_DATA);
+const IOCTL_AI_LIST_FILES: u32 = aibridge_ioctl!(0x805, FILE_READ_DATA);
+const IOCTL_AI_READ_FILE: u32 = aibridge_ioctl!(0x806, FILE_READ_DATA);
+const IOCTL_AI_WRITE_FILE: u32 = aibridge_ioctl!(0x807, FILE_WRITE_DATA);
 
 // ---------------------------------------------------------------------------
 // Struct definitions matching aibridge.h (packed C layouts)
 // ---------------------------------------------------------------------------
-const AI_MAX_PATH: usize = 520;
-const AI_MAX_KEY_NAME: usize = 256;
-const AI_MAX_VALUE_NAME: usize = 256;
-const AI_MAX_PROCESS_NAME: usize = 64;
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct AiReadProcessMemoryIn {
@@ -123,24 +116,6 @@ struct AiFileIoIn {
 }
 
 #[repr(C)]
-struct AiConnectionEntry {
-    local_addr: u64,
-    remote_addr: u64,
-    local_port: u16,
-    remote_port: u16,
-    state: u32,
-    owning_pid: u32,
-    is_ipv6: u32, // BOOLEAN
-    is_udp: u32,  // BOOLEAN
-}
-
-#[repr(C)]
-struct AiListConnectionsOut {
-    entry_count: u32,
-    // Entries follow inline
-}
-
-#[repr(C)]
 struct AiStatus {
     status: i32, // NTSTATUS
 }
@@ -150,7 +125,8 @@ struct AiStatus {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     #[serde(default)]
     id: Option<Value>,
     method: String,
@@ -277,15 +253,6 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["path", "data"]
             }
-        },
-        {
-            "name": "list_connections",
-            "description": "Enumerate active TCP/UDP network connections.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
         }
     ])
 }
@@ -314,16 +281,12 @@ impl DeviceHandle {
             )
         };
 
-        let handle = handle.context("Failed to open \\\\.\\AIAgent. Is the driver installed and running?")?;
+        let handle = handle
+            .context("Failed to open \\\\.\\AIAgent. Is the driver installed and running?")?;
         Ok(DeviceHandle(handle))
     }
 
-    fn ioctl(
-        &self,
-        code: u32,
-        input: &[u8],
-        output_buffer_size: usize,
-    ) -> Result<Vec<u8>> {
+    fn ioctl(&self, code: u32, input: &[u8], output_buffer_size: usize) -> Result<Vec<u8>> {
         let mut output = vec![0u8; output_buffer_size];
         let mut bytes_returned: u32 = 0;
 
@@ -348,10 +311,7 @@ impl DeviceHandle {
             )
         };
 
-        result.context(format!(
-            "DeviceIoControl failed for IOCTL 0x{:08X}",
-            code
-        ))?;
+        result.context(format!("DeviceIoControl failed for IOCTL 0x{:08X}", code))?;
 
         output.truncate(bytes_returned as usize);
         Ok(output)
@@ -382,19 +342,15 @@ fn wide_to_string(data: &[u16]) -> String {
     String::from_utf16_lossy(&data[..end])
 }
 
-fn wide_to_string_range(data: &[u16], max: usize) -> String {
-    let actual = max.min(data.len());
-    let end = data[..actual].iter().position(|&c| c == 0).unwrap_or(actual);
-    String::from_utf16_lossy(&data[..end])
-}
-
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
 
 fn tool_read_process_memory(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let pid: u64 = params["pid"].as_u64().context("pid must be an integer")?;
-    let address: u64 = params["address"].as_u64().context("address must be an integer")?;
+    let address: u64 = params["address"]
+        .as_u64()
+        .context("address must be an integer")?;
     let size: u32 = params["size"].as_u64().map(|v| v as u32).unwrap_or(4096);
 
     if size > 65536 {
@@ -444,8 +400,10 @@ fn tool_list_processes(device: &DeviceHandle, _params: &Value) -> Result<Value> 
             break;
         }
 
-        let entry: &AiProcessEntry = unsafe {
-            &*(output[offset..offset + entry_size].as_ptr() as *const AiProcessEntry)
+        let entry = unsafe {
+            std::ptr::read_unaligned(
+                output[offset..offset + entry_size].as_ptr() as *const AiProcessEntry
+            )
         };
 
         processes.push(json!({
@@ -476,11 +434,13 @@ fn tool_kill_process(device: &DeviceHandle, params: &Value) -> Result<Value> {
         )
     };
 
-    let output = device.ioctl(IOCTL_AI_KILL_PROCESS, input_bytes, std::mem::size_of::<AiStatus>())?;
+    let output = device.ioctl(
+        IOCTL_AI_KILL_PROCESS,
+        input_bytes,
+        std::mem::size_of::<AiStatus>(),
+    )?;
 
-    let status: &AiStatus = unsafe {
-        &*(output.as_ptr() as *const AiStatus)
-    };
+    let status = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiStatus) };
 
     let success = status.status >= 0; // NT_SUCCESS
     Ok(json!({
@@ -491,14 +451,10 @@ fn tool_kill_process(device: &DeviceHandle, params: &Value) -> Result<Value> {
 }
 
 fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
-    let key_path = params["key_path"].as_str().context("key_path must be a string")?;
+    let key_path = params["key_path"]
+        .as_str()
+        .context("key_path must be a string")?;
     let value_name = params["value_name"].as_str().unwrap_or("");
-
-    #[repr(C)]
-    struct RegistryInPacked {
-        header: AiRegistryIn,
-        _pad: [u8; 0],
-    }
 
     let header = AiRegistryIn {
         key_path: to_wide_fixed::<256>(key_path),
@@ -522,8 +478,7 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
         anyhow::bail!("Invalid response from driver");
     }
 
-    let out_header: &AiRegistryOut =
-        unsafe { &*(output.as_ptr() as *const AiRegistryOut) };
+    let out_header = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiRegistryOut) };
 
     let data_offset = std::mem::size_of::<AiRegistryOut>();
     let data_size = out_header.data_size as usize;
@@ -537,9 +492,8 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let value_str = match out_header.value_type {
         1 => {
             // REG_SZ
-            let wide_data = unsafe {
-                std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2)
-            };
+            let wide_data =
+                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2) };
             wide_to_string(wide_data)
         }
         4 => {
@@ -574,10 +528,14 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
 }
 
 fn tool_write_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
-    let key_path = params["key_path"].as_str().context("key_path must be a string")?;
+    let key_path = params["key_path"]
+        .as_str()
+        .context("key_path must be a string")?;
     let value_name = params["value_name"].as_str().unwrap_or("");
     let value_type: u32 = params["value_type"].as_u64().map(|v| v as u32).unwrap_or(1);
-    let data_b64 = params["data"].as_str().context("data must be a base64 string")?;
+    let data_b64 = params["data"]
+        .as_str()
+        .context("data must be a base64 string")?;
 
     let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64)
         .context("Failed to decode base64 data")?;
@@ -610,9 +568,7 @@ fn tool_write_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
         std::mem::size_of::<AiStatus>(),
     )?;
 
-    let status: &AiStatus = unsafe {
-        &*(output.as_ptr() as *const AiStatus)
-    };
+    let status = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiStatus) };
 
     let success = status.status >= 0;
     Ok(json!({
@@ -638,16 +594,15 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
     };
 
     let max_entries = 512usize;
-    let out_size = std::mem::size_of::<AiListFilesOut>()
-        + max_entries * std::mem::size_of::<AiFileEntry>();
+    let out_size =
+        std::mem::size_of::<AiListFilesOut>() + max_entries * std::mem::size_of::<AiFileEntry>();
     let output = device.ioctl(IOCTL_AI_LIST_FILES, input_bytes, out_size)?;
 
     if output.len() < std::mem::size_of::<AiListFilesOut>() {
         anyhow::bail!("Invalid response from driver");
     }
 
-    let out_header: &AiListFilesOut =
-        unsafe { &*(output.as_ptr() as *const AiListFilesOut) };
+    let out_header = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiListFilesOut) };
     let entry_size = std::mem::size_of::<AiFileEntry>();
     let entry_count = out_header.entry_count as usize;
 
@@ -658,8 +613,11 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
             break;
         }
 
-        let entry: &AiFileEntry =
-            unsafe { &*(output[offset..offset + entry_size].as_ptr() as *const AiFileEntry) };
+        let entry = unsafe {
+            std::ptr::read_unaligned(
+                output[offset..offset + entry_size].as_ptr() as *const AiFileEntry
+            )
+        };
 
         fn filetime_to_iso(ft: i64) -> String {
             if ft <= 0 {
@@ -672,7 +630,6 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
                 return "N/A".to_string();
             }
             let secs = ns_since_epoch / 10_000_000;
-            let nanos = ((ns_since_epoch % 10_000_000) * 100) as u32;
             // Simplified: just return seconds since epoch
             format!("{}", secs)
         }
@@ -698,10 +655,7 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
 fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let path = params["path"].as_str().context("path must be a string")?;
     let offset: i64 = params["offset"].as_i64().unwrap_or(0);
-    let length: u32 = params["length"]
-        .as_u64()
-        .map(|v| v as u32)
-        .unwrap_or(65536);
+    let length: u32 = params["length"].as_u64().map(|v| v as u32).unwrap_or(65536);
 
     if length > 65536 {
         anyhow::bail!("length must not exceed 65536");
@@ -724,7 +678,9 @@ fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
 
     // Try to interpret as UTF-8 text for display, fallback to hex
     let text_preview = String::from_utf8_lossy(&output);
-    let is_text = text_preview.chars().all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t')
+    let is_text = text_preview
+        .chars()
+        .all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t')
         && !output.is_empty();
 
     Ok(json!({
@@ -740,7 +696,9 @@ fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
 fn tool_write_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let path = params["path"].as_str().context("path must be a string")?;
     let offset: i64 = params["offset"].as_i64().unwrap_or(0);
-    let data_b64 = params["data"].as_str().context("data must be a base64 string")?;
+    let data_b64 = params["data"]
+        .as_str()
+        .context("data must be a base64 string")?;
 
     let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64)
         .context("Failed to decode base64 data")?;
@@ -772,9 +730,7 @@ fn tool_write_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
         std::mem::size_of::<AiStatus>(),
     )?;
 
-    let status: &AiStatus = unsafe {
-        &*(output.as_ptr() as *const AiStatus)
-    };
+    let status = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiStatus) };
 
     let success = status.status >= 0;
     Ok(json!({
@@ -786,62 +742,6 @@ fn tool_write_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     }))
 }
 
-fn tool_list_connections(device: &DeviceHandle, _params: &Value) -> Result<Value> {
-    let max_entries = 2048usize;
-    let out_size = std::mem::size_of::<AiListConnectionsOut>()
-        + max_entries * std::mem::size_of::<AiConnectionEntry>();
-    let output = device.ioctl(IOCTL_AI_LIST_CONNECTIONS, &[], out_size)?;
-
-    if output.len() < std::mem::size_of::<AiListConnectionsOut>() {
-        anyhow::bail!("Invalid response from driver");
-    }
-
-    let out_header: &AiListConnectionsOut =
-        unsafe { &*(output.as_ptr() as *const AiListConnectionsOut) };
-    let entry_size = std::mem::size_of::<AiConnectionEntry>();
-    let entry_count = out_header.entry_count as usize;
-
-    fn ip_to_string(addr: u64) -> String {
-        let b1 = (addr & 0xFF) as u8;
-        let b2 = ((addr >> 8) & 0xFF) as u8;
-        let b3 = ((addr >> 16) & 0xFF) as u8;
-        let b4 = ((addr >> 24) & 0xFF) as u8;
-        format!("{}.{}.{}.{}", b1, b2, b3, b4)
-    }
-
-    fn ntohs(port: u16) -> u16 {
-        ((port & 0xFF) << 8) | ((port >> 8) & 0xFF)
-    }
-
-    let mut connections = Vec::with_capacity(entry_count);
-    for i in 0..entry_count {
-        let offset = std::mem::size_of::<AiListConnectionsOut>() + i * entry_size;
-        if offset + entry_size > output.len() {
-            break;
-        }
-
-        let entry: &AiConnectionEntry =
-            unsafe { &*(output[offset..offset + entry_size].as_ptr() as *const AiConnectionEntry) };
-
-        let proto = if entry.is_udp != 0 { "UDP" } else { "TCP" };
-
-        connections.push(json!({
-            "protocol": proto,
-            "local_address": ip_to_string(entry.local_addr),
-            "local_port": ntohs(entry.local_port),
-            "remote_address": ip_to_string(entry.remote_addr),
-            "remote_port": ntohs(entry.remote_port),
-            "state": entry.state,
-            "owning_pid": entry.owning_pid
-        }));
-    }
-
-    Ok(json!({
-        "count": connections.len(),
-        "connections": connections
-    }))
-}
-
 // ---------------------------------------------------------------------------
 // MCP server main loop
 // ---------------------------------------------------------------------------
@@ -849,23 +749,21 @@ fn handle_request(device: &DeviceHandle, request: &JsonRpcRequest) -> JsonRpcRes
     let id = request.id.clone();
 
     match request.method.as_str() {
-        "initialize" => {
-            JsonRpcResponse {
-                jsonrpc: "2.0",
-                id,
-                result: Some(json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": {}
-                    },
-                    "serverInfo": {
-                        "name": "roxy-kernel-bridge",
-                        "version": "1.0.0"
-                    }
-                })),
-                error: None,
-            }
-        }
+        "initialize" => JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "roxy-kernel-bridge",
+                    "version": "1.0.0"
+                }
+            })),
+            error: None,
+        },
         "tools/list" => JsonRpcResponse {
             jsonrpc: "2.0",
             id,
@@ -903,7 +801,6 @@ fn handle_request(device: &DeviceHandle, request: &JsonRpcRequest) -> JsonRpcRes
                 "list_files" => tool_list_files(device, &tool_args),
                 "read_file" => tool_read_file(device, &tool_args),
                 "write_file" => tool_write_file(device, &tool_args),
-                "list_connections" => tool_list_connections(device, &tool_args),
                 _ => Err(anyhow::anyhow!("Unknown tool: {}", tool_name)),
             };
 
@@ -961,6 +858,47 @@ fn handle_request(device: &DeviceHandle, request: &JsonRpcRequest) -> JsonRpcRes
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ioctl_codes_match_the_driver_header() {
+        assert_eq!(IOCTL_AI_READ_PROCESS_MEMORY, 0x8000_6000);
+        assert_eq!(IOCTL_AI_LIST_PROCESSES, 0x8000_6004);
+        assert_eq!(IOCTL_AI_KILL_PROCESS, 0x8000_A008);
+        assert_eq!(IOCTL_AI_READ_REGISTRY, 0x8000_600C);
+        assert_eq!(IOCTL_AI_WRITE_REGISTRY, 0x8000_A010);
+        assert_eq!(IOCTL_AI_LIST_FILES, 0x8000_6014);
+        assert_eq!(IOCTL_AI_READ_FILE, 0x8000_6018);
+        assert_eq!(IOCTL_AI_WRITE_FILE, 0x8000_A01C);
+    }
+
+    #[test]
+    fn only_implemented_tools_are_advertised() {
+        let tools = tool_definitions();
+        let names: Vec<&str> = tools
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "read_process_memory",
+                "list_processes",
+                "kill_process",
+                "read_registry",
+                "write_registry",
+                "list_files",
+                "read_file",
+                "write_file"
+            ]
+        );
+    }
+}
+
 fn main() -> Result<()> {
     // Disable buffering on stderr for debug logging
     eprintln!("roxy-kernel-bridge starting...");
@@ -1011,7 +949,6 @@ fn main() -> Result<()> {
                 };
 
                 let method = request.method.clone();
-                let has_id = request.id.is_some();
 
                 let response = handle_request(&device, &request);
 
