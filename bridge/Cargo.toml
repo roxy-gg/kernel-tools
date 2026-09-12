@@ -1,0 +1,26 @@
+[package]
+name = "roxy-kernel-bridge"
+version = "1.0.0"
+edition = "2021"
+description = "MCP bridge that wraps Windows kernel driver IOCTLs into MCP JSON-RPC tools"
+license = "MIT"
+
+[[bin]]
+name = "roxy-kernel-bridge"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.58", features = [
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Ioctl",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+hex = "0.4"
+anyhow = "1"
+base64 = "0.22"

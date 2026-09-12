@@ -1,0 +1,25 @@
+﻿# Build outputs
+out/
+
+# Driver build artifacts
+driver/Debug/
+driver/Release/
+driver/x64/
+driver/*.obj
+driver/*.log
+driver/*.err
+driver/*.wrn
+
+# Rust build artifacts
+bridge/target/
+
+# IDE
+.vs/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,51 @@
+[Version]
+Signature = "$WINDOWS NT$"
+Class     = "System"
+ClassGuid = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider  = %Roxy%
+DriverVer = 01/01/2026,1.0.0.0
+CatalogFile = aibridge.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12 ; %windir%\system32\drivers
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+aibridge.sys = 1,,
+
+; ============================================================================
+; Manufacturer section
+; ============================================================================
+[Manufacturer]
+%Roxy% = Roxy, NTamd64
+
+[Roxy.NTamd64]
+; This is a software (non-PnP) driver installed via sc.exe,
+; so we use a Null install section. The .inf primarily serves
+; as documentation and for WHQL signing if desired.
+%ServiceDesc% = NullInstall,
+
+[NullInstall]
+; No hardware detected — driver is loaded by the Service Control Manager
+Include = machine.inf
+Needs   = PnPSoftwareDevice
+
+[NullInstall.Services]
+AddService = AIBridge,,AIBridgeService
+
+[AIBridgeService]
+ServiceType    = 1      ; SERVICE_KERNEL_DRIVER
+StartType      = 3      ; SERVICE_DEMAND_START
+ErrorControl   = 1      ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\aibridge.sys
+
+; ============================================================================
+; Strings
+; ============================================================================
+[Strings]
+Roxy         = "Roxy AI"
+DiskName     = "Roxy Kernel Bridge Driver Disk"
+ServiceDesc  = "Roxy AI Kernel Bridge Driver"
