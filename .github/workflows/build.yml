@@ -1,0 +1,56 @@
+name: Build kernel tools
+
+on:
+  push:
+    branches: [main, "fix/**", "feat/**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Build, test, and test-sign package
+        shell: powershell
+        run: .\build.ps1 -Version "${{ github.ref_name }}" -TestSign
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-tools-windows-x64-${{ github.sha }}
+          path: |
+            dist/kernel-tools-windows-x64.zip
+            dist/kernel-tools-symbols-windows-x64.zip
+            dist/checksums.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-tools-windows-x64-${{ github.sha }}
+          path: dist
+      - name: Publish GitHub release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          dist/kernel-tools-windows-x64.zip
+          dist/kernel-tools-symbols-windows-x64.zip
+          dist/checksums.sha256
+          --repo "${{ github.repository }}"
+          --verify-tag
+          --generate-notes
+          --title "Kernel Tools ${{ github.ref_name }}"

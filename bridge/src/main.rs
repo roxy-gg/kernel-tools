@@ -329,12 +329,21 @@ impl Drop for DeviceHandle {
 // ---------------------------------------------------------------------------
 // Helper: wide string conversion
 // ---------------------------------------------------------------------------
-fn to_wide_fixed<const N: usize>(s: &str) -> [u16; N] {
+fn to_wide_fixed<const N: usize>(s: &str, field: &str, allow_empty: bool) -> Result<[u16; N]> {
+    if !allow_empty && s.is_empty() {
+        anyhow::bail!("{} must not be empty", field);
+    }
+
     let mut buf = [0u16; N];
     let encoded: Vec<u16> = OsStr::new(s).encode_wide().collect();
-    let len = encoded.len().min(N - 1);
-    buf[..len].copy_from_slice(&encoded[..len]);
-    buf
+    if encoded.contains(&0) {
+        anyhow::bail!("{} must not contain a NUL character", field);
+    }
+    if encoded.len() >= N {
+        anyhow::bail!("{} must be at most {} UTF-16 code units", field, N - 1);
+    }
+    buf[..encoded.len()].copy_from_slice(&encoded);
+    Ok(buf)
 }
 
 fn wide_to_string(data: &[u16]) -> String {
@@ -457,8 +466,8 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let value_name = params["value_name"].as_str().unwrap_or("");
 
     let header = AiRegistryIn {
-        key_path: to_wide_fixed::<256>(key_path),
-        value_name: to_wide_fixed::<256>(value_name),
+        key_path: to_wide_fixed::<256>(key_path, "key_path", false)?,
+        value_name: to_wide_fixed::<256>(value_name, "value_name", true)?,
         value_type: 0,
         data_size: 0,
     };
@@ -496,21 +505,11 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
                 unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2) };
             wide_to_string(wide_data)
         }
-        4 => {
-            // REG_DWORD
-            if data.len() >= 4 {
-                format!("{}", u32::from_le_bytes(data[..4].try_into().unwrap()))
-            } else {
-                format!("0x{}", hex::encode(data))
-            }
+        4 if data.len() >= 4 => {
+            format!("{}", u32::from_le_bytes(data[..4].try_into().unwrap()))
         }
-        11 => {
-            // REG_QWORD
-            if data.len() >= 8 {
-                format!("{}", u64::from_le_bytes(data[..8].try_into().unwrap()))
-            } else {
-                format!("0x{}", hex::encode(data))
-            }
+        11 if data.len() >= 8 => {
+            format!("{}", u64::from_le_bytes(data[..8].try_into().unwrap()))
         }
         _ => {
             format!("0x{}", hex::encode(data))
@@ -545,8 +544,8 @@ fn tool_write_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
     }
 
     let header = AiRegistryIn {
-        key_path: to_wide_fixed::<256>(key_path),
-        value_name: to_wide_fixed::<256>(value_name),
+        key_path: to_wide_fixed::<256>(key_path, "key_path", false)?,
+        value_name: to_wide_fixed::<256>(value_name, "value_name", true)?,
         value_type,
         data_size: data.len() as u32,
     };
@@ -583,7 +582,7 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let path = params["path"].as_str().context("path must be a string")?;
 
     let input = AiListFilesIn {
-        directory_path: to_wide_fixed::<520>(path),
+        directory_path: to_wide_fixed::<520>(path, "path", false)?,
     };
 
     let input_bytes = unsafe {
@@ -603,15 +602,17 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
     }
 
     let out_header = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiListFilesOut) };
+    let header_size = std::mem::size_of::<AiListFilesOut>();
     let entry_size = std::mem::size_of::<AiFileEntry>();
     let entry_count = out_header.entry_count as usize;
+    let available_entries = (output.len() - header_size) / entry_size;
+    if entry_count > max_entries || entry_count > available_entries {
+        anyhow::bail!("Invalid file-list response from driver");
+    }
 
     let mut files = Vec::with_capacity(entry_count);
     for i in 0..entry_count {
-        let offset = std::mem::size_of::<AiListFilesOut>() + i * entry_size;
-        if offset + entry_size > output.len() {
-            break;
-        }
+        let offset = header_size + i * entry_size;
 
         let entry = unsafe {
             std::ptr::read_unaligned(
@@ -662,7 +663,7 @@ fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     }
 
     let input = AiFileIoIn {
-        file_path: to_wide_fixed::<520>(path),
+        file_path: to_wide_fixed::<520>(path, "path", false)?,
         byte_offset: offset,
         length,
     };
@@ -708,7 +709,7 @@ fn tool_write_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     }
 
     let header = AiFileIoIn {
-        file_path: to_wide_fixed::<520>(path),
+        file_path: to_wide_fixed::<520>(path, "path", false)?,
         byte_offset: offset,
         length: data.len() as u32,
     };
@@ -896,6 +897,40 @@ mod tests {
                 "write_file"
             ]
         );
+    }
+
+    #[test]
+    fn fixed_wide_strings_require_space_for_a_terminator() {
+        let value = to_wide_fixed::<4>("abc", "path", false).expect("fits exactly");
+        assert_eq!(value, ['a' as u16, 'b' as u16, 'c' as u16, 0]);
+
+        let error = to_wide_fixed::<4>("abcd", "path", false).unwrap_err();
+        assert!(error.to_string().contains("at most 3 UTF-16 code units"));
+    }
+
+    #[test]
+    fn fixed_wide_strings_count_utf16_code_units() {
+        assert!(to_wide_fixed::<3>("x", "path", false).is_ok());
+        assert!(to_wide_fixed::<3>("\u{1F600}", "path", false).is_ok());
+        assert!(to_wide_fixed::<2>("\u{1F600}", "path", false).is_err());
+    }
+
+    #[test]
+    fn fixed_wide_strings_reject_empty_required_fields() {
+        assert!(to_wide_fixed::<4>("", "path", false).is_err());
+        assert!(to_wide_fixed::<4>("", "value_name", true).is_ok());
+    }
+
+    #[test]
+    fn fixed_wide_strings_reject_embedded_nuls() {
+        let error = to_wide_fixed::<8>("ab\0cd", "path", false).unwrap_err();
+        assert!(error.to_string().contains("NUL character"));
+    }
+
+    #[test]
+    fn file_list_wire_layout_remains_stable() {
+        assert_eq!(std::mem::size_of::<AiListFilesOut>(), 4);
+        assert_eq!(std::mem::size_of::<AiFileEntry>(), 1080);
     }
 }
 

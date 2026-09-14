@@ -7,10 +7,41 @@
  * Build: WDK / Visual Studio with KMDF 1.31+
  */
 
-#include <ntddk.h>
+#include <ntifs.h>
 #include <wdf.h>
 #include <ntstrsafe.h>
 #include "aibridge.h"
+
+#define AI_SYSTEM_PROCESS_INFORMATION_CLASS 5
+#define AI_PROCESS_TERMINATE 0x0001
+
+typedef struct _AI_SYSTEM_PROCESS_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG NumberOfThreads;
+    LARGE_INTEGER WorkingSetPrivateSize;
+    ULONG HardFaultCount;
+    ULONG NumberOfThreadsHighWatermark;
+    ULONGLONG CycleTime;
+    LARGE_INTEGER CreateTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER KernelTime;
+    UNICODE_STRING ImageName;
+    KPRIORITY BasePriority;
+    HANDLE UniqueProcessId;
+    HANDLE InheritedFromUniqueProcessId;
+    ULONG HandleCount;
+    ULONG SessionId;
+} AI_SYSTEM_PROCESS_INFORMATION, *PAI_SYSTEM_PROCESS_INFORMATION;
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwQuerySystemInformation(
+    _In_ ULONG SystemInformationClass,
+    _Out_writes_bytes_opt_(SystemInformationLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+);
 
 // ---------------------------------------------------------------------------
 // Forward declarations
@@ -28,6 +59,31 @@ static NTSTATUS HandleWriteRegistry(WDFREQUEST Request, size_t InputBufferLength
 static NTSTATUS HandleListFiles(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 static NTSTATUS HandleReadFile(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 static NTSTATUS HandleWriteFile(WDFREQUEST Request, size_t InputBufferLength);
+
+static NTSTATUS
+InitFixedUnicodeString(
+    _Out_ PUNICODE_STRING Destination,
+    _In_reads_(Capacity) PWCHAR Buffer,
+    _In_ size_t Capacity,
+    _In_ BOOLEAN AllowEmpty
+)
+{
+    size_t length = 0;
+
+    while (length < Capacity && Buffer[length] != L'\0') {
+        length++;
+    }
+
+    if (length == Capacity || (!AllowEmpty && length == 0) ||
+        length > (MAXUSHORT / sizeof(WCHAR)) - 1) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Destination->Buffer = Buffer;
+    Destination->Length = (USHORT)(length * sizeof(WCHAR));
+    Destination->MaximumLength = (USHORT)((length + 1) * sizeof(WCHAR));
+    return STATUS_SUCCESS;
+}
 
 // ---------------------------------------------------------------------------
 // DriverEntry
@@ -285,7 +341,7 @@ HandleListProcesses(
 
     // Get system process information
     ULONG bufferSize = 0;
-    status = ZwQuerySystemInformation(SystemProcessInformation, NULL, 0, &bufferSize);
+    status = ZwQuerySystemInformation(AI_SYSTEM_PROCESS_INFORMATION_CLASS, NULL, 0, &bufferSize);
     if (status != STATUS_INFO_LENGTH_MISMATCH) {
         return STATUS_UNSUCCESSFUL;
     }
@@ -296,13 +352,13 @@ HandleListProcesses(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    status = ZwQuerySystemInformation(SystemProcessInformation, procInfo, bufferSize, NULL);
+    status = ZwQuerySystemInformation(AI_SYSTEM_PROCESS_INFORMATION_CLASS, procInfo, bufferSize, NULL);
     if (!NT_SUCCESS(status)) {
         ExFreePool(procInfo);
         return status;
     }
 
-    PSYSTEM_PROCESS_INFORMATION spi = (PSYSTEM_PROCESS_INFORMATION)procInfo;
+    PAI_SYSTEM_PROCESS_INFORMATION spi = (PAI_SYSTEM_PROCESS_INFORMATION)procInfo;
     ULONG written = 0;
 
     while (written < maxEntries) {
@@ -329,7 +385,7 @@ HandleListProcesses(
         written++;
 
         if (spi->NextEntryOffset == 0) break;
-        spi = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)spi + spi->NextEntryOffset);
+        spi = (PAI_SYSTEM_PROCESS_INFORMATION)((PUCHAR)spi + spi->NextEntryOffset);
     }
 
     *pCount = written;
@@ -374,7 +430,7 @@ HandleKillProcess(
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 
-    status = ZwOpenProcess(&hProcess, PROCESS_TERMINATE, &oa, &clientId);
+    status = ZwOpenProcess(&hProcess, AI_PROCESS_TERMINATE, &oa, &clientId);
     ObDereferenceObject(targetProcess);
 
     if (NT_SUCCESS(status)) {
@@ -415,7 +471,8 @@ HandleReadRegistry(
     PAI_REGISTRY_IN input = (PAI_REGISTRY_IN)inBuffer;
 
     UNICODE_STRING keyName;
-    RtlInitUnicodeString(&keyName, input->KeyPath);
+    status = InitFixedUnicodeString(&keyName, input->KeyPath, AI_MAX_KEY_NAME, FALSE);
+    if (!NT_SUCCESS(status)) return status;
 
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &keyName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -428,7 +485,11 @@ HandleReadRegistry(
     }
 
     UNICODE_STRING valueName;
-    RtlInitUnicodeString(&valueName, input->ValueName);
+    status = InitFixedUnicodeString(&valueName, input->ValueName, AI_MAX_VALUE_NAME, TRUE);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(hKey);
+        return status;
+    }
 
     ULONG resultLength = 0;
     status = ZwQueryValueKey(hKey, &valueName, KeyValuePartialInformation, NULL, 0, &resultLength);
@@ -509,7 +570,8 @@ HandleWriteRegistry(
     PUCHAR data = (PUCHAR)inBuffer + sizeof(AI_REGISTRY_IN);
 
     UNICODE_STRING keyName;
-    RtlInitUnicodeString(&keyName, input->KeyPath);
+    status = InitFixedUnicodeString(&keyName, input->KeyPath, AI_MAX_KEY_NAME, FALSE);
+    if (!NT_SUCCESS(status)) return status;
 
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &keyName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -534,7 +596,11 @@ HandleWriteRegistry(
     }
 
     UNICODE_STRING valueName;
-    RtlInitUnicodeString(&valueName, input->ValueName);
+    status = InitFixedUnicodeString(&valueName, input->ValueName, AI_MAX_VALUE_NAME, TRUE);
+    if (!NT_SUCCESS(status)) {
+        ZwClose(hKey);
+        return status;
+    }
 
     status = ZwSetValueKey(hKey, &valueName, 0, input->ValueType, data, input->DataSize);
     ZwClose(hKey);
@@ -571,7 +637,8 @@ HandleListFiles(
     PAI_LIST_FILES_IN input = (PAI_LIST_FILES_IN)inBuffer;
 
     UNICODE_STRING usSearchPath;
-    RtlInitUnicodeString(&usSearchPath, input->DirectoryPath);
+    status = InitFixedUnicodeString(&usSearchPath, input->DirectoryPath, AI_MAX_PATH, FALSE);
+    if (!NT_SUCCESS(status)) return status;
 
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &usSearchPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -593,34 +660,7 @@ HandleListFiles(
         return status;
     }
 
-    ULONG dirInfoSize = AI_MAX_FILE_ENTRIES * sizeof(FILE_DIRECTORY_INFORMATION);
-    PFILE_DIRECTORY_INFORMATION dirInfo = (PFILE_DIRECTORY_INFORMATION)
-        ExAllocatePool2(POOL_FLAG_PAGED, dirInfoSize, 'fdA');
-    if (dirInfo == NULL) {
-        ZwClose(hDir);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    status = ZwQueryDirectoryFile(
-        hDir,
-        NULL, NULL, NULL,
-        &iosb,
-        dirInfo,
-        dirInfoSize,
-        FileDirectoryInformation,
-        FALSE,
-        NULL,
-        FALSE
-    );
-
-    if (!NT_SUCCESS(status) && status != STATUS_NO_MORE_FILES) {
-        ExFreePool(dirInfo);
-        ZwClose(hDir);
-        return status;
-    }
-
-    if (OutputBufferLength < sizeof(AI_LIST_FILES_OUT)) {
-        ExFreePool(dirInfo);
+    if (OutputBufferLength < sizeof(AI_LIST_FILES_OUT) + sizeof(AI_FILE_ENTRY)) {
         ZwClose(hDir);
         return STATUS_BUFFER_TOO_SMALL;
     }
@@ -628,45 +668,107 @@ HandleListFiles(
     PVOID outBuffer = NULL;
     status = WdfRequestRetrieveOutputBuffer(Request, OutputBufferLength, &outBuffer, NULL);
     if (!NT_SUCCESS(status)) {
-        ExFreePool(dirInfo);
         ZwClose(hDir);
         return status;
     }
 
     PAI_LIST_FILES_OUT output = (PAI_LIST_FILES_OUT)outBuffer;
-    PAI_FILE_ENTRY entries = (PAI_FILE_ENTRY)(output + 1);
+    PUCHAR entries = (PUCHAR)(output + 1);
     ULONG maxEntries = (ULONG)((OutputBufferLength - sizeof(AI_LIST_FILES_OUT)) / sizeof(AI_FILE_ENTRY));
-
     if (maxEntries > AI_MAX_FILE_ENTRIES) {
         maxEntries = AI_MAX_FILE_ENTRIES;
     }
 
-    PFILE_DIRECTORY_INFORMATION current = dirInfo;
+    RtlZeroMemory(outBuffer, OutputBufferLength);
+
+    ULONG dirInfoSize = AI_MAX_READ_SIZE;
+    PFILE_DIRECTORY_INFORMATION dirInfo = (PFILE_DIRECTORY_INFORMATION)
+        ExAllocatePool2(POOL_FLAG_PAGED, dirInfoSize, 'fdA');
+    if (dirInfo == NULL) {
+        ZwClose(hDir);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     ULONG entryCount = 0;
+    BOOLEAN restartScan = TRUE;
 
     while (entryCount < maxEntries) {
-        ULONG nameLen = current->FileNameLength / sizeof(WCHAR);
-        if (nameLen >= AI_MAX_PATH) nameLen = AI_MAX_PATH - 1;
+        RtlZeroMemory(dirInfo, dirInfoSize);
+        RtlZeroMemory(&iosb, sizeof(iosb));
 
-        RtlStringCbCopyNW(
-            entries[entryCount].FileName,
-            sizeof(entries[entryCount].FileName),
-            current->FileName,
-            nameLen * sizeof(WCHAR)
+        status = ZwQueryDirectoryFile(
+            hDir,
+            NULL, NULL, NULL,
+            &iosb,
+            dirInfo,
+            dirInfoSize,
+            FileDirectoryInformation,
+            FALSE,
+            NULL,
+            restartScan
         );
+        restartScan = FALSE;
 
-        entries[entryCount].FileSize.QuadPart = current->EndOfFile.QuadPart;
-        entries[entryCount].CreationTime.QuadPart = current->CreationTime.QuadPart;
-        entries[entryCount].LastAccessTime.QuadPart = current->LastAccessTime.QuadPart;
-        entries[entryCount].LastWriteTime.QuadPart = current->LastWriteTime.QuadPart;
-        entries[entryCount].FileAttributes = current->FileAttributes;
-        entries[entryCount].IsDirectory =
-            (current->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (status == STATUS_NO_MORE_FILES) {
+            status = STATUS_SUCCESS;
+            break;
+        }
+        if (NT_SUCCESS(status) && iosb.Information == 0) {
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        if (!NT_SUCCESS(status) ||
+            iosb.Information > dirInfoSize ||
+            iosb.Information < FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName)) {
+            if (NT_SUCCESS(status)) status = STATUS_DATA_ERROR;
+            break;
+        }
 
-        entryCount++;
+        ULONG currentOffset = 0;
+        ULONG directoryBytes = (ULONG)iosb.Information;
 
-        if (current->NextEntryOffset == 0) break;
-        current = (PFILE_DIRECTORY_INFORMATION)((PUCHAR)current + current->NextEntryOffset);
+        while (entryCount < maxEntries) {
+            ULONG fixedSize = FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName);
+            ULONG remaining = directoryBytes - currentOffset;
+            PFILE_DIRECTORY_INFORMATION current =
+                (PFILE_DIRECTORY_INFORMATION)((PUCHAR)dirInfo + currentOffset);
+
+            if (remaining < fixedSize ||
+                current->FileNameLength > remaining - fixedSize ||
+                (current->FileNameLength % sizeof(WCHAR)) != 0) {
+                status = STATUS_DATA_ERROR;
+                break;
+            }
+
+            AI_FILE_ENTRY entry;
+            RtlZeroMemory(&entry, sizeof(entry));
+
+            ULONG nameLen = current->FileNameLength / sizeof(WCHAR);
+            if (nameLen >= AI_MAX_PATH) nameLen = AI_MAX_PATH - 1;
+            RtlCopyMemory(entry.FileName, current->FileName, nameLen * sizeof(WCHAR));
+            entry.FileName[nameLen] = L'\0';
+            entry.FileSize.QuadPart = current->EndOfFile.QuadPart;
+            entry.CreationTime.QuadPart = current->CreationTime.QuadPart;
+            entry.LastAccessTime.QuadPart = current->LastAccessTime.QuadPart;
+            entry.LastWriteTime.QuadPart = current->LastWriteTime.QuadPart;
+            entry.FileAttributes = current->FileAttributes;
+            entry.IsDirectory = (current->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            RtlCopyMemory(entries + entryCount * sizeof(AI_FILE_ENTRY), &entry, sizeof(entry));
+            entryCount++;
+
+            if (current->NextEntryOffset == 0) break;
+            if (current->NextEntryOffset < fixedSize ||
+                current->NextEntryOffset < fixedSize + current->FileNameLength ||
+                current->NextEntryOffset > remaining ||
+                (current->NextEntryOffset % sizeof(ULONGLONG)) != 0) {
+                status = STATUS_DATA_ERROR;
+                break;
+            }
+            currentOffset += current->NextEntryOffset;
+        }
+
+        if (!NT_SUCCESS(status)) break;
     }
 
     output->EntryCount = entryCount;
@@ -674,8 +776,12 @@ HandleListFiles(
     ExFreePool(dirInfo);
     ZwClose(hDir);
 
-    size_t bytesReturned = sizeof(AI_LIST_FILES_OUT) + entryCount * sizeof(AI_FILE_ENTRY);
-    WdfRequestSetInformation(Request, bytesReturned);
+    if (!NT_SUCCESS(status)) return status;
+
+    WdfRequestSetInformation(
+        Request,
+        sizeof(AI_LIST_FILES_OUT) + entryCount * sizeof(AI_FILE_ENTRY)
+    );
     return STATUS_SUCCESS;
 }
 
@@ -704,7 +810,8 @@ HandleReadFile(
     }
 
     UNICODE_STRING fileName;
-    RtlInitUnicodeString(&fileName, input->FilePath);
+    status = InitFixedUnicodeString(&fileName, input->FilePath, AI_MAX_PATH, FALSE);
+    if (!NT_SUCCESS(status)) return status;
 
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &fileName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -783,7 +890,8 @@ HandleWriteFile(
     PUCHAR data = (PUCHAR)inBuffer + sizeof(AI_FILE_IO_IN);
 
     UNICODE_STRING fileName;
-    RtlInitUnicodeString(&fileName, input->FilePath);
+    status = InitFixedUnicodeString(&fileName, input->FilePath, AI_MAX_PATH, FALSE);
+    if (!NT_SUCCESS(status)) return status;
 
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &fileName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
