@@ -12,8 +12,9 @@ $symbols = Join-Path $dist "symbols"
 
 function Find-WdkTool([string]$Name) {
     $kitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
-    $tool = Get-ChildItem (Join-Path $kitsRoot "bin\*\x64\$Name") -ErrorAction SilentlyContinue |
-        Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+    $tool = Get-ChildItem $kitsRoot -Filter $Name -File -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match "\\x64\\" } |
+        Sort-Object FullName -Descending |
         Select-Object -First 1
     if (-not $tool) {
         throw "$Name was not found. Install the Windows Driver Kit with Visual Studio integration."
