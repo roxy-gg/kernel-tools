@@ -49,6 +49,7 @@ struct AiReadProcessMemoryIn {
     process_id: u64,
     address: u64,
     size: u32,
+    _padding: [u8; 4],
 }
 
 #[repr(C)]
@@ -98,7 +99,8 @@ struct AiFileEntry {
     last_access_time: i64,
     last_write_time: i64,
     file_attributes: u32,
-    is_directory: u32, // BOOLEAN
+    is_directory: u8, // BOOLEAN
+    _padding: [u8; 3],
 }
 
 #[repr(C)]
@@ -112,6 +114,7 @@ struct AiFileIoIn {
     file_path: [u16; 520],
     byte_offset: i64,
     length: u32,
+    _padding: [u8; 4],
     // Data follows inline for writes
 }
 
@@ -287,6 +290,10 @@ impl DeviceHandle {
     }
 
     fn ioctl(&self, code: u32, input: &[u8], output_buffer_size: usize) -> Result<Vec<u8>> {
+        if input.len() > u32::MAX as usize || output_buffer_size > u32::MAX as usize {
+            anyhow::bail!("IOCTL buffer length exceeds the Windows API limit");
+        }
+
         let mut output = vec![0u8; output_buffer_size];
         let mut bytes_returned: u32 = 0;
 
@@ -313,6 +320,9 @@ impl DeviceHandle {
 
         result.context(format!("DeviceIoControl failed for IOCTL 0x{:08X}", code))?;
 
+        if bytes_returned as usize > output_buffer_size {
+            anyhow::bail!("Driver returned more bytes than the output buffer can hold");
+        }
         output.truncate(bytes_returned as usize);
         Ok(output)
     }
@@ -360,16 +370,18 @@ fn tool_read_process_memory(device: &DeviceHandle, params: &Value) -> Result<Val
     let address: u64 = params["address"]
         .as_u64()
         .context("address must be an integer")?;
-    let size: u32 = params["size"].as_u64().map(|v| v as u32).unwrap_or(4096);
+    let size = params["size"].as_u64().context("size must be an integer")?;
 
-    if size > 65536 {
-        anyhow::bail!("size must not exceed 65536");
+    if size == 0 || size > 65536 {
+        anyhow::bail!("size must be between 1 and 65536");
     }
+    let size = size as u32;
 
     let input = AiReadProcessMemoryIn {
         process_id: pid,
         address,
         size,
+        _padding: [0; 4],
     };
 
     let input_bytes = unsafe {
@@ -380,6 +392,9 @@ fn tool_read_process_memory(device: &DeviceHandle, params: &Value) -> Result<Val
     };
 
     let output = device.ioctl(IOCTL_AI_READ_PROCESS_MEMORY, input_bytes, size as usize)?;
+    if output.len() != size as usize {
+        anyhow::bail!("Invalid process-memory response from driver");
+    }
 
     Ok(json!({
         "pid": pid,
@@ -401,6 +416,10 @@ fn tool_list_processes(device: &DeviceHandle, _params: &Value) -> Result<Value> 
 
     let count = u32::from_le_bytes(output[..4].try_into().unwrap()) as usize;
     let entry_size = std::mem::size_of::<AiProcessEntry>();
+    let available_entries = (output.len() - 4) / entry_size;
+    if count > available_entries || output.len() != 4 + count * entry_size {
+        anyhow::bail!("Invalid process-list response from driver");
+    }
 
     let mut processes = Vec::with_capacity(count);
     for i in 0..count {
@@ -448,6 +467,9 @@ fn tool_kill_process(device: &DeviceHandle, params: &Value) -> Result<Value> {
         input_bytes,
         std::mem::size_of::<AiStatus>(),
     )?;
+    if output.len() != std::mem::size_of::<AiStatus>() {
+        anyhow::bail!("Invalid status response from driver");
+    }
 
     let status = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiStatus) };
 
@@ -463,7 +485,9 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let key_path = params["key_path"]
         .as_str()
         .context("key_path must be a string")?;
-    let value_name = params["value_name"].as_str().unwrap_or("");
+    let value_name = params["value_name"]
+        .as_str()
+        .context("value_name must be a string")?;
 
     let header = AiRegistryIn {
         key_path: to_wide_fixed::<256>(key_path, "key_path", false)?,
@@ -491,19 +515,23 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
 
     let data_offset = std::mem::size_of::<AiRegistryOut>();
     let data_size = out_header.data_size as usize;
-    let data = if data_offset + data_size <= output.len() {
-        &output[data_offset..data_offset + data_size]
-    } else {
-        &[]
-    };
+    if data_size > 4096 || data_offset + data_size != output.len() {
+        anyhow::bail!("Invalid registry response from driver");
+    }
+    let data = &output[data_offset..data_offset + data_size];
 
     // Interpret value based on type
     let value_str = match out_header.value_type {
         1 => {
             // REG_SZ
-            let wide_data =
-                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2) };
-            wide_to_string(wide_data)
+            if data.len() % 2 != 0 {
+                anyhow::bail!("Invalid REG_SZ response from driver");
+            }
+            let wide_data: Vec<u16> = data
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            wide_to_string(&wide_data)
         }
         4 if data.len() >= 4 => {
             format!("{}", u32::from_le_bytes(data[..4].try_into().unwrap()))
@@ -530,8 +558,16 @@ fn tool_write_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let key_path = params["key_path"]
         .as_str()
         .context("key_path must be a string")?;
-    let value_name = params["value_name"].as_str().unwrap_or("");
-    let value_type: u32 = params["value_type"].as_u64().map(|v| v as u32).unwrap_or(1);
+    let value_name = params["value_name"]
+        .as_str()
+        .context("value_name must be a string")?;
+    let value_type = params["value_type"]
+        .as_u64()
+        .context("value_type must be an unsigned integer")?;
+    if value_type > u32::MAX as u64 {
+        anyhow::bail!("value_type must fit in an unsigned 32-bit integer");
+    }
+    let value_type = value_type as u32;
     let data_b64 = params["data"]
         .as_str()
         .context("data must be a base64 string")?;
@@ -566,6 +602,9 @@ fn tool_write_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
         &input_bytes,
         std::mem::size_of::<AiStatus>(),
     )?;
+    if output.len() != std::mem::size_of::<AiStatus>() {
+        anyhow::bail!("Invalid status response from driver");
+    }
 
     let status = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiStatus) };
 
@@ -606,7 +645,10 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let entry_size = std::mem::size_of::<AiFileEntry>();
     let entry_count = out_header.entry_count as usize;
     let available_entries = (output.len() - header_size) / entry_size;
-    if entry_count > max_entries || entry_count > available_entries {
+    if entry_count > max_entries
+        || entry_count > available_entries
+        || output.len() != header_size + entry_count * entry_size
+    {
         anyhow::bail!("Invalid file-list response from driver");
     }
 
@@ -655,17 +697,27 @@ fn tool_list_files(device: &DeviceHandle, params: &Value) -> Result<Value> {
 
 fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let path = params["path"].as_str().context("path must be a string")?;
-    let offset: i64 = params["offset"].as_i64().unwrap_or(0);
-    let length: u32 = params["length"].as_u64().map(|v| v as u32).unwrap_or(65536);
+    let offset = match params.get("offset") {
+        Some(value) => value.as_i64().context("offset must be an integer")?,
+        None => 0,
+    };
+    let length = match params.get("length") {
+        Some(value) => value
+            .as_u64()
+            .context("length must be an unsigned integer")?,
+        None => 65536,
+    };
 
-    if length > 65536 {
-        anyhow::bail!("length must not exceed 65536");
+    if length == 0 || length > 65536 {
+        anyhow::bail!("length must be between 1 and 65536");
     }
+    let length = length as u32;
 
     let input = AiFileIoIn {
         file_path: to_wide_fixed::<520>(path, "path", false)?,
         byte_offset: offset,
         length,
+        _padding: [0; 4],
     };
 
     let input_bytes = unsafe {
@@ -676,6 +728,9 @@ fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     };
 
     let output = device.ioctl(IOCTL_AI_READ_FILE, input_bytes, length as usize)?;
+    if output.len() > length as usize {
+        anyhow::bail!("Invalid file response from driver");
+    }
 
     // Try to interpret as UTF-8 text for display, fallback to hex
     let text_preview = String::from_utf8_lossy(&output);
@@ -683,6 +738,11 @@ fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
         .chars()
         .all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t')
         && !output.is_empty();
+    let text_preview = if is_text {
+        text_preview.chars().take(4096).collect::<String>()
+    } else {
+        "[binary data]".to_string()
+    };
 
     Ok(json!({
         "path": path,
@@ -690,13 +750,16 @@ fn tool_read_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
         "bytes_read": output.len(),
         "data_hex": hex::encode(&output),
         "data_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &output),
-        "text_preview": if is_text { &text_preview[..text_preview.len().min(4096)] } else { "[binary data]" }
+        "text_preview": text_preview
     }))
 }
 
 fn tool_write_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
     let path = params["path"].as_str().context("path must be a string")?;
-    let offset: i64 = params["offset"].as_i64().unwrap_or(0);
+    let offset = match params.get("offset") {
+        Some(value) => value.as_i64().context("offset must be an integer")?,
+        None => 0,
+    };
     let data_b64 = params["data"]
         .as_str()
         .context("data must be a base64 string")?;
@@ -712,6 +775,7 @@ fn tool_write_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
         file_path: to_wide_fixed::<520>(path, "path", false)?,
         byte_offset: offset,
         length: data.len() as u32,
+        _padding: [0; 4],
     };
 
     let header_size = std::mem::size_of::<AiFileIoIn>();
@@ -730,6 +794,9 @@ fn tool_write_file(device: &DeviceHandle, params: &Value) -> Result<Value> {
         &input_bytes,
         std::mem::size_of::<AiStatus>(),
     )?;
+    if output.len() != std::mem::size_of::<AiStatus>() {
+        anyhow::bail!("Invalid status response from driver");
+    }
 
     let status = unsafe { std::ptr::read_unaligned(output.as_ptr() as *const AiStatus) };
 
@@ -925,6 +992,18 @@ mod tests {
     fn fixed_wide_strings_reject_embedded_nuls() {
         let error = to_wide_fixed::<8>("ab\0cd", "path", false).unwrap_err();
         assert!(error.to_string().contains("NUL character"));
+    }
+
+    #[test]
+    fn fixed_input_wire_layouts_remain_stable() {
+        assert_eq!(std::mem::size_of::<AiReadProcessMemoryIn>(), 24);
+        assert_eq!(std::mem::size_of::<AiRegistryIn>(), 1032);
+        assert_eq!(std::mem::size_of::<AiFileIoIn>(), 1056);
+    }
+
+    #[test]
+    fn process_list_wire_layout_remains_stable() {
+        assert_eq!(std::mem::size_of::<AiProcessEntry>(), 168);
     }
 
     #[test]

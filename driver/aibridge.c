@@ -52,13 +52,13 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL EvtIoDeviceControl;
 
 // Dispatch helpers
 static NTSTATUS HandleReadProcessMemory(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
-static NTSTATUS HandleListProcesses(WDFREQUEST Request, size_t OutputBufferLength);
-static NTSTATUS HandleKillProcess(WDFREQUEST Request, size_t InputBufferLength);
+static NTSTATUS HandleListProcesses(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
+static NTSTATUS HandleKillProcess(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 static NTSTATUS HandleReadRegistry(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
-static NTSTATUS HandleWriteRegistry(WDFREQUEST Request, size_t InputBufferLength);
+static NTSTATUS HandleWriteRegistry(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 static NTSTATUS HandleListFiles(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 static NTSTATUS HandleReadFile(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
-static NTSTATUS HandleWriteFile(WDFREQUEST Request, size_t InputBufferLength);
+static NTSTATUS HandleWriteFile(WDFREQUEST Request, size_t InputBufferLength, size_t OutputBufferLength);
 
 static NTSTATUS
 InitFixedUnicodeString(
@@ -192,16 +192,16 @@ EvtIoDeviceControl(
         status = HandleReadProcessMemory(Request, InputBufferLength, OutputBufferLength);
         break;
     case IOCTL_AI_LIST_PROCESSES:
-        status = HandleListProcesses(Request, OutputBufferLength);
+        status = HandleListProcesses(Request, InputBufferLength, OutputBufferLength);
         break;
     case IOCTL_AI_KILL_PROCESS:
-        status = HandleKillProcess(Request, InputBufferLength);
+        status = HandleKillProcess(Request, InputBufferLength, OutputBufferLength);
         break;
     case IOCTL_AI_READ_REGISTRY:
         status = HandleReadRegistry(Request, InputBufferLength, OutputBufferLength);
         break;
     case IOCTL_AI_WRITE_REGISTRY:
-        status = HandleWriteRegistry(Request, InputBufferLength);
+        status = HandleWriteRegistry(Request, InputBufferLength, OutputBufferLength);
         break;
     case IOCTL_AI_LIST_FILES:
         status = HandleListFiles(Request, InputBufferLength, OutputBufferLength);
@@ -210,7 +210,7 @@ EvtIoDeviceControl(
         status = HandleReadFile(Request, InputBufferLength, OutputBufferLength);
         break;
     case IOCTL_AI_WRITE_FILE:
-        status = HandleWriteFile(Request, InputBufferLength);
+        status = HandleWriteFile(Request, InputBufferLength, OutputBufferLength);
         break;
     default:
         KdPrint(("AIBridge: Unknown IOCTL: 0x%08X\n", IoControlCode));
@@ -286,13 +286,19 @@ HandleReadProcessMemory(
     if (InputBufferLength < sizeof(AI_READ_PROCESS_MEMORY_IN)) {
         return STATUS_BUFFER_TOO_SMALL;
     }
+    if (InputBufferLength != sizeof(AI_READ_PROCESS_MEMORY_IN)) {
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
 
     status = WdfRequestRetrieveInputBuffer(Request, sizeof(AI_READ_PROCESS_MEMORY_IN), &inBuffer, NULL);
     if (!NT_SUCCESS(status)) return status;
 
     PAI_READ_PROCESS_MEMORY_IN input = (PAI_READ_PROCESS_MEMORY_IN)inBuffer;
 
-    if (input->Size > AI_MAX_READ_SIZE || input->Size > OutputBufferLength) {
+    if (input->Size == 0 || input->Size > AI_MAX_READ_SIZE) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (input->Size > OutputBufferLength) {
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -319,6 +325,7 @@ HandleReadProcessMemory(
 static NTSTATUS
 HandleListProcesses(
     WDFREQUEST Request,
+    size_t     InputBufferLength,
     size_t     OutputBufferLength
 )
 {
@@ -326,6 +333,9 @@ HandleListProcesses(
     PVOID outBuffer = NULL;
     ULONG maxEntries;
 
+    if (InputBufferLength != 0) {
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
     if (OutputBufferLength < sizeof(ULONG) + sizeof(AI_PROCESS_ENTRY)) {
         return STATUS_BUFFER_TOO_SMALL;
     }
@@ -402,10 +412,14 @@ HandleListProcesses(
 static NTSTATUS
 HandleKillProcess(
     WDFREQUEST Request,
-    size_t     InputBufferLength
+    size_t     InputBufferLength,
+    size_t     OutputBufferLength
 )
 {
-    if (InputBufferLength < sizeof(AI_KILL_PROCESS_IN)) {
+    if (InputBufferLength != sizeof(AI_KILL_PROCESS_IN)) {
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
+    if (OutputBufferLength < sizeof(AI_STATUS)) {
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -463,6 +477,12 @@ HandleReadRegistry(
     if (InputBufferLength < sizeof(AI_REGISTRY_IN)) {
         return STATUS_BUFFER_TOO_SMALL;
     }
+    if (InputBufferLength != sizeof(AI_REGISTRY_IN)) {
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
+    if (OutputBufferLength < sizeof(AI_REGISTRY_OUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
 
     PVOID inBuffer = NULL;
     NTSTATUS status = WdfRequestRetrieveInputBuffer(Request, InputBufferLength, &inBuffer, NULL);
@@ -498,19 +518,19 @@ HandleReadRegistry(
         return (status == STATUS_SUCCESS) ? STATUS_OBJECT_NAME_NOT_FOUND : status;
     }
 
-    ULONG infoSize = resultLength + sizeof(KEY_VALUE_PARTIAL_INFORMATION);
-    if (infoSize > OutputBufferLength) {
-        infoSize = (ULONG)OutputBufferLength;
+    if (resultLength < FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data)) {
+        ZwClose(hKey);
+        return STATUS_DATA_ERROR;
     }
 
     PKEY_VALUE_PARTIAL_INFORMATION kvpi = (PKEY_VALUE_PARTIAL_INFORMATION)
-        ExAllocatePool2(POOL_FLAG_PAGED, infoSize, 'vrA');
+        ExAllocatePool2(POOL_FLAG_PAGED, resultLength, 'vrA');
     if (kvpi == NULL) {
         ZwClose(hKey);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    status = ZwQueryValueKey(hKey, &valueName, KeyValuePartialInformation, kvpi, infoSize, &resultLength);
+    status = ZwQueryValueKey(hKey, &valueName, KeyValuePartialInformation, kvpi, resultLength, &resultLength);
     ZwClose(hKey);
 
     if (!NT_SUCCESS(status)) {
@@ -527,8 +547,13 @@ HandleReadRegistry(
 
     ULONG dataSize = kvpi->DataLength;
     ULONG outHeaderSize = sizeof(AI_REGISTRY_OUT);
+    if (dataSize > AI_MAX_VALUE_DATA) {
+        ExFreePool(kvpi);
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
     if (outHeaderSize + dataSize > OutputBufferLength) {
-        dataSize = (ULONG)(OutputBufferLength - outHeaderSize);
+        ExFreePool(kvpi);
+        return STATUS_BUFFER_TOO_SMALL;
     }
 
     PAI_REGISTRY_OUT output = (PAI_REGISTRY_OUT)outBuffer;
@@ -549,7 +574,8 @@ HandleReadRegistry(
 static NTSTATUS
 HandleWriteRegistry(
     WDFREQUEST Request,
-    size_t     InputBufferLength
+    size_t     InputBufferLength,
+    size_t     OutputBufferLength
 )
 {
     if (InputBufferLength < sizeof(AI_REGISTRY_IN)) {
@@ -563,8 +589,11 @@ HandleWriteRegistry(
     PAI_REGISTRY_IN input = (PAI_REGISTRY_IN)inBuffer;
 
     if (input->DataSize > AI_MAX_VALUE_DATA ||
-        sizeof(AI_REGISTRY_IN) + input->DataSize > InputBufferLength) {
+        sizeof(AI_REGISTRY_IN) + input->DataSize != InputBufferLength) {
         return STATUS_INVALID_PARAMETER;
+    }
+    if (OutputBufferLength < sizeof(AI_STATUS)) {
+        return STATUS_BUFFER_TOO_SMALL;
     }
 
     PUCHAR data = (PUCHAR)inBuffer + sizeof(AI_REGISTRY_IN);
@@ -628,6 +657,9 @@ HandleListFiles(
 {
     if (InputBufferLength < sizeof(AI_LIST_FILES_IN)) {
         return STATUS_BUFFER_TOO_SMALL;
+    }
+    if (InputBufferLength != sizeof(AI_LIST_FILES_IN)) {
+        return STATUS_INVALID_BUFFER_SIZE;
     }
 
     PVOID inBuffer = NULL;
@@ -798,6 +830,9 @@ HandleReadFile(
     if (InputBufferLength < sizeof(AI_FILE_IO_IN)) {
         return STATUS_BUFFER_TOO_SMALL;
     }
+    if (InputBufferLength != sizeof(AI_FILE_IO_IN)) {
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
 
     PVOID inBuffer = NULL;
     NTSTATUS status = WdfRequestRetrieveInputBuffer(Request, InputBufferLength, &inBuffer, NULL);
@@ -805,7 +840,10 @@ HandleReadFile(
 
     PAI_FILE_IO_IN input = (PAI_FILE_IO_IN)inBuffer;
 
-    if (input->Length > AI_MAX_READ_SIZE || input->Length > OutputBufferLength) {
+    if (input->Length == 0 || input->Length > AI_MAX_READ_SIZE) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (input->Length > OutputBufferLength) {
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -869,7 +907,8 @@ HandleReadFile(
 static NTSTATUS
 HandleWriteFile(
     WDFREQUEST Request,
-    size_t     InputBufferLength
+    size_t     InputBufferLength,
+    size_t     OutputBufferLength
 )
 {
     if (InputBufferLength < sizeof(AI_FILE_IO_IN)) {
@@ -883,8 +922,11 @@ HandleWriteFile(
     PAI_FILE_IO_IN input = (PAI_FILE_IO_IN)inBuffer;
 
     if (input->Length > AI_MAX_READ_SIZE ||
-        sizeof(AI_FILE_IO_IN) + input->Length > InputBufferLength) {
+        sizeof(AI_FILE_IO_IN) + input->Length != InputBufferLength) {
         return STATUS_INVALID_PARAMETER;
+    }
+    if (OutputBufferLength < sizeof(AI_STATUS)) {
+        return STATUS_BUFFER_TOO_SMALL;
     }
 
     PUCHAR data = (PUCHAR)inBuffer + sizeof(AI_FILE_IO_IN);

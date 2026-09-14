@@ -95,6 +95,38 @@ production driver signature.
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | .\out\roxy-kernel-bridge.exe
 ```
 
+## Staged validation
+
+Run the privileged validation harness before registering the bridge as an MCP
+server. Use an isolated Windows test machine because the harness intentionally
+loads a kernel driver and exercises privileged process, registry, and file
+operations.
+
+```powershell
+# Run from an elevated Windows PowerShell session.
+.\tests\staged-validation.ps1 `
+  -DriverPath .\dist\package\aibridge.sys `
+  -BridgePath .\dist\package\roxy-kernel-bridge.exe `
+  -CertificatePath .\dist\package\aibridge-test.cer `
+  -LoadCycles 20 `
+  -ConfigureKernelDumps
+```
+
+The harness:
+
+- Repeatedly loads, opens, and unloads a disposable validation service.
+- Exercises every IOCTL with valid, boundary, oversized, truncated, and malformed requests.
+- Performs a process-list health probe after every rejected request.
+- Restricts destructive tests to a process, registry key, and file it creates.
+- Invokes all eight Rust bridge tools directly over stdin/stdout.
+- Records crash-dump settings and detects new or changed dump files.
+- Writes `validation-report.json` and a driver/bridge hash-bound `mcp-eligibility.json`.
+
+The harness does not register MCP. Enable agent access only when the eligibility
+report says `mcpEligible: true` and its hashes match the installed artifacts.
+Kernel-memory dump configuration is not restored automatically because it is a
+safety setting intended to survive a later crash or reboot.
+
 ## Security Warning
 
 This driver grants ring-0-backed operations to SYSTEM and elevated administrator
