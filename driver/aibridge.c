@@ -7,7 +7,7 @@
  * Build: WDK / Visual Studio with KMDF 1.31+
  */
 
-#include <ntddk.h>
+#include <ntifs.h>
 #include <wdf.h>
 #include <ntstrsafe.h>
 #include "aibridge.h"

@@ -1,7 +1,7 @@
 #ifndef AIBRIDGE_H
 #define AIBRIDGE_H
 
-#include <ntddk.h>
+#include <ntifs.h>
 
 // ---------------------------------------------------------------------------
 // Device names
