@@ -29,6 +29,7 @@
 
 // ---------------------------------------------------------------------------
 // Maximum sizes for embedded strings in request/response structures
+// Every fixed-size request string must contain a NUL terminator within its array.
 // ---------------------------------------------------------------------------
 #define AI_MAX_PATH          520   // wchar_t count
 #define AI_MAX_KEY_NAME      256   // wchar_t count
