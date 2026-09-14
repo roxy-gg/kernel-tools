@@ -56,6 +56,7 @@ if ($TestSign) {
     $signTool = Find-WdkTool "signtool.exe"
     & $signTool sign /v /fd SHA256 /s My /sha1 $certificate.Thumbprint (Join-Path $package "aibridge.sys")
     if ($LASTEXITCODE -ne 0) { throw "Driver signing failed." }
+    Copy-Item -Force (Join-Path $package "aibridge.sys") $driver
     Export-Certificate -Cert $certificate -FilePath (Join-Path $package "aibridge-test.cer") | Out-Null
 }
 
