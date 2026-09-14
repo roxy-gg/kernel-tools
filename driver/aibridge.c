@@ -518,7 +518,7 @@ HandleReadRegistry(
         return (status == STATUS_SUCCESS) ? STATUS_OBJECT_NAME_NOT_FOUND : status;
     }
 
-    if (resultLength < FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data)) {
+    if (resultLength < (ULONG)FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data)) {
         ZwClose(hKey);
         return STATUS_DATA_ERROR;
     }
@@ -751,7 +751,7 @@ HandleListFiles(
         }
         if (!NT_SUCCESS(status) ||
             iosb.Information > dirInfoSize ||
-            iosb.Information < FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName)) {
+            iosb.Information < (ULONG_PTR)FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName)) {
             if (NT_SUCCESS(status)) status = STATUS_DATA_ERROR;
             break;
         }
@@ -760,7 +760,7 @@ HandleListFiles(
         ULONG directoryBytes = (ULONG)iosb.Information;
 
         while (entryCount < maxEntries) {
-            ULONG fixedSize = FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName);
+            ULONG fixedSize = (ULONG)FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName);
             ULONG remaining = directoryBytes - currentOffset;
             PFILE_DIRECTORY_INFORMATION current =
                 (PFILE_DIRECTORY_INFORMATION)((PUCHAR)dirInfo + currentOffset);
