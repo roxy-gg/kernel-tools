@@ -528,8 +528,10 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
                 anyhow::bail!("Invalid REG_SZ response from driver");
             }
             let wide_data: Vec<u16> = data
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
                 .collect();
             wide_to_string(&wide_data)
         }
