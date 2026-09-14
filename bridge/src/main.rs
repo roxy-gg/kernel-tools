@@ -505,21 +505,11 @@ fn tool_read_registry(device: &DeviceHandle, params: &Value) -> Result<Value> {
                 unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u16, data.len() / 2) };
             wide_to_string(wide_data)
         }
-        4 => {
-            // REG_DWORD
-            if data.len() >= 4 {
-                format!("{}", u32::from_le_bytes(data[..4].try_into().unwrap()))
-            } else {
-                format!("0x{}", hex::encode(data))
-            }
+        4 if data.len() >= 4 => {
+            format!("{}", u32::from_le_bytes(data[..4].try_into().unwrap()))
         }
-        11 => {
-            // REG_QWORD
-            if data.len() >= 8 {
-                format!("{}", u64::from_le_bytes(data[..8].try_into().unwrap()))
-            } else {
-                format!("0x{}", hex::encode(data))
-            }
+        11 if data.len() >= 8 => {
+            format!("{}", u64::from_le_bytes(data[..8].try_into().unwrap()))
         }
         _ => {
             format!("0x{}", hex::encode(data))
