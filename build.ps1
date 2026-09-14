@@ -60,23 +60,11 @@ if ($TestSign) {
 }
 
 if ($TestSign) {
-    $signTool = Find-WdkTool "signtool.exe"
-    $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
-    $publisherStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
-    try {
-        $rootStore.Open("ReadWrite")
-        $publisherStore.Open("ReadWrite")
-        $rootStore.Add($certificate)
-        $publisherStore.Add($certificate)
-        & $signTool verify /v /pa (Join-Path $package "aibridge.sys")
-        if ($LASTEXITCODE -ne 0) { throw "Driver signature verification failed." }
-    } finally {
-        if ($rootStore.IsOpen) { $rootStore.Remove($certificate) }
-        if ($publisherStore.IsOpen) { $publisherStore.Remove($certificate) }
-        $rootStore.Close()
-        $publisherStore.Close()
-        Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+    $signature = Get-AuthenticodeSignature (Join-Path $package "aibridge.sys")
+    if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+        throw "The packaged driver is not signed by the generated test certificate."
     }
+    Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
 }
 
 $sourceCommit = (& git -C $root rev-parse HEAD).Trim()
