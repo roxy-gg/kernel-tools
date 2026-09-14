@@ -25,6 +25,7 @@ $buildArgs = @("build")
 if ($Configuration -eq "release") {
     $buildArgs += "--release"
 }
+$buildArgs += "--locked"
 
 & cargo $buildArgs
 
@@ -48,7 +49,7 @@ $exePath = if ($Configuration -eq "release") {
 
 if (Test-Path $exePath) {
     Copy-Item -Force $exePath $outDir
-    Write-Host "  → Copied roxy-kernel-bridge.exe to $outDir"
+    Write-Host "  Copied roxy-kernel-bridge.exe to $outDir"
 } else {
     Write-Error "Build output not found at: $exePath"
     exit 1

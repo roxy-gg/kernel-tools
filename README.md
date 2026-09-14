@@ -48,19 +48,33 @@ JSON-RPC tools over stdin/stdout.
 - `read_file`
 - `write_file`
 
-## Prerequisites
+## Installable builds
+
+Each version tag publishes `kernel-tools-windows-x64.zip` on GitHub Releases. The
+archive contains the test-signed `aibridge.sys` driver, its public test
+certificate and catalog, and `roxy-kernel-bridge.exe`. Roxy downloads a pinned
+release, verifies its SHA-256 digest, and installs it only after explicit user
+confirmation and a UAC prompt.
+
+These development releases require Windows test-signing mode and trusting the
+included public certificate. Normal Secure Boot production deployment requires
+Microsoft attestation or WHQL signing; a GitHub-built test certificate is not a
+production driver signature.
+
+## Build prerequisites
 
 - **Windows 10/11** (x64) with Test Signing enabled: `bcdedit /set testsigning on`
-- **WDK** (Windows Driver Kit) — for building `aibridge.sys`
+- **Visual Studio 2022** with Desktop development with C++
+- **WDK** with the Windows Driver Kit Visual Studio component
+- A matching Windows SDK and WDK version
 - **Rust** (stable MSVC toolchain) — for building `roxy-kernel-bridge.exe`
 - **Administrator** privileges to install the driver
 
 ## Quick Start
 
 ```powershell
-# 1. Build everything
-.\driver\build.ps1
-.\bridge\build.ps1
+# 1. Build, test, and package everything
+.\build.ps1 -TestSign
 
 # 2. Install the driver
 .\install.ps1
