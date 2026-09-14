@@ -21,6 +21,20 @@ jobs:
       - name: Build, test, and test-sign package
         shell: powershell
         run: .\build.ps1 -Version "${{ github.ref_name }}" -TestSign
+      - name: Verify signing material cleanup
+        if: always()
+        shell: powershell
+        run: |
+          $certificates = Get-ChildItem `
+            Cert:\CurrentUser\My, `
+            Cert:\LocalMachine\Root, `
+            Cert:\LocalMachine\TrustedPublisher `
+            -ErrorAction SilentlyContinue |
+            Where-Object Subject -eq "CN=Roxy Kernel Tools Test Signing"
+          if ($certificates) {
+            $certificates | Format-List PSParentPath, Thumbprint, HasPrivateKey
+            throw "Test-signing certificate or private-key material remains on the runner."
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: kernel-tools-windows-x64-${{ github.sha }}

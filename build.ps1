@@ -50,22 +50,56 @@ if ($TestSign) {
         -KeyAlgorithm RSA `
         -KeyLength 3072 `
         -HashAlgorithm SHA256 `
-        -KeyExportPolicy Exportable `
+        -KeyExportPolicy NonExportable `
         -NotAfter (Get-Date).AddYears(3)
 
-    $signTool = Find-WdkTool "signtool.exe"
-    & $signTool sign /v /fd SHA256 /s My /sha1 $certificate.Thumbprint (Join-Path $package "aibridge.sys")
-    if ($LASTEXITCODE -ne 0) { throw "Driver signing failed." }
-    Copy-Item -Force (Join-Path $package "aibridge.sys") $driver
-    Export-Certificate -Cert $certificate -FilePath (Join-Path $package "aibridge-test.cer") | Out-Null
-}
+    $rootTrustedForVerification = $false
+    $publisherTrustedForVerification = $false
+    try {
+        $signTool = Find-WdkTool "signtool.exe"
+        & $signTool sign /v /fd SHA256 /s My /sha1 $certificate.Thumbprint (Join-Path $package "aibridge.sys")
+        if ($LASTEXITCODE -ne 0) { throw "Driver signing failed." }
+        Copy-Item -Force (Join-Path $package "aibridge.sys") $driver
+        $certificatePath = Join-Path $package "aibridge-test.cer"
+        Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
+        if ($env:GITHUB_ACTIONS -eq "true") {
+            Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
+            $rootTrustedForVerification = $true
+            Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
+            $publisherTrustedForVerification = $true
+        }
 
-if ($TestSign) {
-    $signature = Get-AuthenticodeSignature (Join-Path $package "aibridge.sys")
-    if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
-        throw "The packaged driver is not signed by the generated test certificate."
+        $verifyOutputLog = Join-Path $dist "signtool-verify.stdout.log"
+        $verifyErrorLog = Join-Path $dist "signtool-verify.stderr.log"
+        $verifyProcess = Start-Process `
+            -FilePath $signTool `
+            -ArgumentList @("verify", "/v", "/pa", (Join-Path $package "aibridge.sys")) `
+            -RedirectStandardOutput $verifyOutputLog `
+            -RedirectStandardError $verifyErrorLog `
+            -Wait `
+            -PassThru
+        $verifyOutput = (Get-Content -Raw $verifyOutputLog), (Get-Content -Raw $verifyErrorLog) -join "`n"
+        Remove-Item $verifyOutputLog, $verifyErrorLog -Force
+        if ($verifyProcess.ExitCode -ne 0) {
+            if (($rootTrustedForVerification -and $publisherTrustedForVerification) -or $verifyOutput -notmatch "terminated in a root\s+certificate which is not trusted") {
+                throw "Driver signature verification failed.`n$verifyOutput"
+            }
+        }
+        Write-Host $verifyOutput
+
+        $signature = Get-AuthenticodeSignature (Join-Path $package "aibridge.sys")
+        if (-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+            throw "The packaged driver is not signed by the generated test certificate."
+        }
+    } finally {
+        if ($rootTrustedForVerification) {
+            Remove-Item "Cert:\LocalMachine\Root\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+        }
+        if ($publisherTrustedForVerification) {
+            Remove-Item "Cert:\LocalMachine\TrustedPublisher\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
 }
 
 $sourceCommit = (& git -C $root rev-parse HEAD).Trim()
