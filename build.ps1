@@ -73,7 +73,7 @@ if ($TestSign) {
         $verifyErrorLog = Join-Path $dist "signtool-verify.stderr.log"
         $verifyProcess = Start-Process `
             -FilePath $signTool `
-            -ArgumentList @("verify", "/v", "/kp", (Join-Path $package "aibridge.sys")) `
+            -ArgumentList @("verify", "/v", "/pa", (Join-Path $package "aibridge.sys")) `
             -RedirectStandardOutput $verifyOutputLog `
             -RedirectStandardError $verifyErrorLog `
             -Wait `

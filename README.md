@@ -57,14 +57,15 @@ release, verifies its SHA-256 digest, and installs it only after explicit user
 confirmation and a UAC prompt.
 
 The release workflow creates a one-build, non-exportable private key, embeds a
-SHA-256 signature in the driver, checks it with SignTool under kernel-mode
+SHA-256 signature in the driver, verifies it with SignTool's Authenticode
 policy, matches the embedded signer to the generated certificate, and deletes
 the private key before uploading artifacts. CI temporarily trusts the public
 certificate in the runner's machine stores so SignTool must report success, then
-removes that trust. Non-elevated local builds accept only SignTool's expected
-self-signed-root error; any other verification failure stops the build. Only the
-public certificate is published. During installation, Roxy adds that certificate
-to the target machine's Trusted Root and Trusted Publishers stores and removes
+removes that trust. A final workflow guard fails if the certificate or private
+key remains on the runner. Non-elevated local builds accept only SignTool's
+expected self-signed-root error; any other verification failure stops the build.
+Only the public certificate is published. During installation, Roxy adds that
+certificate to the target machine's Trusted Root and Trusted Publishers stores and removes
 only trust entries that Roxy added when Kernel Tools is uninstalled.
 
 These development releases require Windows test-signing mode and trusting the
