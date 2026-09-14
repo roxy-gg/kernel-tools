@@ -12,6 +12,37 @@
 #include <ntstrsafe.h>
 #include "aibridge.h"
 
+#define AI_SYSTEM_PROCESS_INFORMATION_CLASS 5
+#define AI_PROCESS_TERMINATE 0x0001
+
+typedef struct _AI_SYSTEM_PROCESS_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG NumberOfThreads;
+    LARGE_INTEGER WorkingSetPrivateSize;
+    ULONG HardFaultCount;
+    ULONG NumberOfThreadsHighWatermark;
+    ULONGLONG CycleTime;
+    LARGE_INTEGER CreateTime;
+    LARGE_INTEGER UserTime;
+    LARGE_INTEGER KernelTime;
+    UNICODE_STRING ImageName;
+    KPRIORITY BasePriority;
+    HANDLE UniqueProcessId;
+    HANDLE InheritedFromUniqueProcessId;
+    ULONG HandleCount;
+    ULONG SessionId;
+} AI_SYSTEM_PROCESS_INFORMATION, *PAI_SYSTEM_PROCESS_INFORMATION;
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwQuerySystemInformation(
+    _In_ ULONG SystemInformationClass,
+    _Out_writes_bytes_opt_(SystemInformationLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+);
+
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
@@ -310,7 +341,7 @@ HandleListProcesses(
 
     // Get system process information
     ULONG bufferSize = 0;
-    status = ZwQuerySystemInformation(SystemProcessInformation, NULL, 0, &bufferSize);
+    status = ZwQuerySystemInformation(AI_SYSTEM_PROCESS_INFORMATION_CLASS, NULL, 0, &bufferSize);
     if (status != STATUS_INFO_LENGTH_MISMATCH) {
         return STATUS_UNSUCCESSFUL;
     }
@@ -321,13 +352,13 @@ HandleListProcesses(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    status = ZwQuerySystemInformation(SystemProcessInformation, procInfo, bufferSize, NULL);
+    status = ZwQuerySystemInformation(AI_SYSTEM_PROCESS_INFORMATION_CLASS, procInfo, bufferSize, NULL);
     if (!NT_SUCCESS(status)) {
         ExFreePool(procInfo);
         return status;
     }
 
-    PSYSTEM_PROCESS_INFORMATION spi = (PSYSTEM_PROCESS_INFORMATION)procInfo;
+    PAI_SYSTEM_PROCESS_INFORMATION spi = (PAI_SYSTEM_PROCESS_INFORMATION)procInfo;
     ULONG written = 0;
 
     while (written < maxEntries) {
@@ -354,7 +385,7 @@ HandleListProcesses(
         written++;
 
         if (spi->NextEntryOffset == 0) break;
-        spi = (PSYSTEM_PROCESS_INFORMATION)((PUCHAR)spi + spi->NextEntryOffset);
+        spi = (PAI_SYSTEM_PROCESS_INFORMATION)((PUCHAR)spi + spi->NextEntryOffset);
     }
 
     *pCount = written;
@@ -399,7 +430,7 @@ HandleKillProcess(
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 
-    status = ZwOpenProcess(&hProcess, PROCESS_TERMINATE, &oa, &clientId);
+    status = ZwOpenProcess(&hProcess, AI_PROCESS_TERMINATE, &oa, &clientId);
     ObDereferenceObject(targetProcess);
 
     if (NT_SUCCESS(status)) {
