@@ -52,7 +52,7 @@ JSON-RPC tools over stdin/stdout.
 
 Each version tag publishes `kernel-tools-windows-x64.zip` on GitHub Releases. The
 archive contains the test-signed `aibridge.sys` driver, its public test
-certificate and catalog, and `roxy-kernel-bridge.exe`. Roxy downloads a pinned
+certificate, and `roxy-kernel-bridge.exe`. Roxy downloads a pinned
 release, verifies its SHA-256 digest, and installs it only after explicit user
 confirmation and a UAC prompt.
 

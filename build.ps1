@@ -39,7 +39,7 @@ if ($LASTEXITCODE -ne 0) { throw "Bridge build failed." }
 
 $driver = Join-Path $out "aibridge.sys"
 $bridge = Join-Path $out "roxy-kernel-bridge.exe"
-Copy-Item $driver, $bridge, (Join-Path $root "driver\aibridge.inf") -Destination $package
+Copy-Item $driver, $bridge -Destination $package
 
 $certificate = $null
 if ($TestSign) {
@@ -59,19 +59,8 @@ if ($TestSign) {
     Export-Certificate -Cert $certificate -FilePath (Join-Path $package "aibridge-test.cer") | Out-Null
 }
 
-$infVerif = Find-WdkTool "infverif.exe"
-& $infVerif (Join-Path $package "aibridge.inf")
-if ($LASTEXITCODE -ne 0) { throw "INF verification failed." }
-
-$inf2Cat = Find-WdkTool "inf2cat.exe"
-& $inf2Cat "/driver:$package" "/os:10_VB_X64,10_NI_X64,10_GE_X64" /uselocaltime
-if ($LASTEXITCODE -ne 0) { throw "Catalog generation failed." }
-
 if ($TestSign) {
     $signTool = Find-WdkTool "signtool.exe"
-    & $signTool sign /v /fd SHA256 /s My /sha1 $certificate.Thumbprint (Join-Path $package "aibridge.cat")
-    if ($LASTEXITCODE -ne 0) { throw "Catalog signing failed." }
-
     $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
     $publisherStore = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
     try {
@@ -81,8 +70,6 @@ if ($TestSign) {
         $publisherStore.Add($certificate)
         & $signTool verify /v /pa (Join-Path $package "aibridge.sys")
         if ($LASTEXITCODE -ne 0) { throw "Driver signature verification failed." }
-        & $signTool verify /v /pa (Join-Path $package "aibridge.cat")
-        if ($LASTEXITCODE -ne 0) { throw "Catalog signature verification failed." }
     } finally {
         if ($rootStore.IsOpen) { $rootStore.Remove($certificate) }
         if ($publisherStore.IsOpen) { $publisherStore.Remove($certificate) }
