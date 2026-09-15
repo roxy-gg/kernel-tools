@@ -18,6 +18,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Validate staged test harness syntax
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\tests\staged-validation.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count) {
+            $errors | Format-List Message, Extent
+            throw "The staged validation harness has syntax errors."
+          }
       - name: Build, test, and test-sign package
         shell: powershell
         run: .\build.ps1 -Version "${{ github.ref_name }}" -TestSign
